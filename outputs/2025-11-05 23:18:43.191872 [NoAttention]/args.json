@@ -1,0 +1,21 @@
+{
+    "base_path": "../arcade/nnUnet_dataset/syntax",
+    "in_c": 1,
+    "base_channel": 32,
+    "image_shape": [
+        512,
+        512
+    ],
+    "class_count": 26,
+    "attention": false,
+    "batch_size": 10,
+    "num_workers": 4,
+    "device": "cuda",
+    "lr": 0.0001,
+    "momentum": 0.9,
+    "epcohs": 30,
+    "f_int_scale": 2,
+    "full_report_cycle": 10,
+    "output_base_path": "./outputs",
+    "name": "NoAttention"
+}
