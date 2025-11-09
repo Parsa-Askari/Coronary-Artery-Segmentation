@@ -3,6 +3,7 @@ import json
 import os
 import matplotlib.pyplot as plt
 ###IE###
+###SS###
 class HistoryRecorder:
     def __init__(self,class_maps,losses_keys,class_count = 25):
 

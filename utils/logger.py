@@ -9,6 +9,7 @@ import json
 import shutil
 ###IE###
 from .helpers import draw_mask
+###SS###
 colors = np.array([
     (242,  24,  24),   # Red
     (242,  77,  24),   # Red-Orange

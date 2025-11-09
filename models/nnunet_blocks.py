@@ -1,6 +1,8 @@
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
+###IE###
+###SS###
 class Conv(nn.Module):
     def __init__(self,in_c , out_c,p):
         super(Conv,self).__init__()
