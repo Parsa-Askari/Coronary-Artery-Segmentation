@@ -7,6 +7,7 @@ import datetime
 import os
 import json
 import shutil
+###IE###
 from .helpers import draw_mask
 colors = np.array([
     (242,  24,  24),   # Red
@@ -193,8 +194,8 @@ def draw_examples(model,valid_loader,args,class_map,output_folder_path,w=6,h=6):
     plt.figure(figsize=(30,30))
     plot_count =18
     patches = [
-        mpatches.Patch(color=np.array(colors[j]) / 255.0, label=class_map[j])
-        for j in range(len(class_map))
+        mpatches.Patch(color=np.array(colors[j-1]) / 255.0, label=class_map[j])
+        for j in range(1,len(class_map)+1)
     ]
     i=0
     img_index=1

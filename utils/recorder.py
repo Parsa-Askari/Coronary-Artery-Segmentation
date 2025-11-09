@@ -2,6 +2,7 @@ import numpy as np
 import json
 import os
 import matplotlib.pyplot as plt
+###IE###
 class HistoryRecorder:
     def __init__(self,class_maps,losses_keys,class_count = 25):
 
@@ -17,7 +18,7 @@ class HistoryRecorder:
         self.class_maps =class_maps
         for part in self.history :
             self.metric_history[part]={"dice":{},"precision":{},"recall":{}}
-            for i in range(class_count):
+            for i in range(1,class_count+1):
                 self.metric_history[part]["dice"][i]=[]
                 self.metric_history[part]["recall"][i]=[]
                 self.metric_history[part]["precision"][i]=[]
@@ -34,13 +35,16 @@ class HistoryRecorder:
             self.history[part][loss_name][-1] += [loss]
         
     def add_metrics(self,dice,precision,recall,part):
+        dice = dice[1:]
+        precision = precision[1:]
+        recall = recall[1:]
         for i in range(self.class_count):
             d = dice[i]
             r = recall[i]
             p = precision[i]
-            self.metric_history[part]["dice"][i].append(d)
-            self.metric_history[part]["recall"][i].append(r)
-            self.metric_history[part]["precision"][i].append(p)
+            self.metric_history[part]["dice"][i+1].append(d)
+            self.metric_history[part]["recall"][i+1].append(r)
+            self.metric_history[part]["precision"][i+1].append(p)
     def avg_losses(self,part):
         for key in self.history[part]:
             self.history[part][key][-1] = np.mean(self.history[part][key][-1])

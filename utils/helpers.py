@@ -11,6 +11,7 @@ import torch
 import copy
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
+###IE###
 from .dataset import UnetExampleDataset
 def read_images(base_path, part,preprocessor, max_workers=None):
     base_path = Path(base_path)
@@ -93,10 +94,10 @@ def draw_mask(image,mask,args=None,colors=None):
     for i in range(H):
         for j in range(W):
             c = mask[i,j]
-            if(c==25):
+            if(c==0):
                 continue
             if(colors is not None):
-                img[i,j] = colors[c]
+                img[i,j] = colors[c-1]
             else :
                 img[i,j] = (0,255,0)
     # plt.imshow(image)

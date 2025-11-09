@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+###IE###
 class UnetLoss(nn.Module):
     def __init__(self,args,eps = 1e-8):
         super(UnetLoss,self).__init__()
@@ -30,11 +31,15 @@ class UnetLoss(nn.Module):
 
         prob = self.softmax(pred_mask)
 
-        prob = prob[:,:25]
-        onehot_mask = onehot_mask[:,:25]
-        present_class = onehot_mask.sum(dim=self.sum_dims)>0
+        forground_prob = prob[:,1:]
+        forground_onehot_mask = onehot_mask[:,1:]
+        present_class = forground_onehot_mask.sum(dim=self.sum_dims)>0
         
-        second_loss = self.loss_fn(pred_probs = prob,gt = onehot_mask,present_class=present_class)
+        second_loss = self.loss_fn(
+            pred_probs = forground_prob,
+            gt = forground_onehot_mask,
+            present_class=present_class
+        )
         total_loss = ce_loss + second_loss
 
         loss_dict = {
@@ -52,7 +57,6 @@ class DiceLoss(nn.Module):
         dice_numerator = (gt * pred_probs).sum(dim=self.sum_dims)
         dice_denominator = gt.sum(dim=self.sum_dims) + pred_probs.sum(dim=self.sum_dims)
         per_class_dice_loss = (2*dice_numerator)/(dice_denominator + self.eps)
-        present_class = gt.sum(dim=self.sum_dims)>0
         if(present_class is None):
             dice_loss = -per_class_dice_loss.mean()
         else:

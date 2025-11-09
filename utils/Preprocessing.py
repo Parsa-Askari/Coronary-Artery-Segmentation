@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from albumentations.core.transforms_interface import ImageOnlyTransform
-
+###IE###
 class CLAHE : 
     def __init__(self,clipLimit=2.0,tileGridSize=(8, 8)):
         self.clahe = cv2.createCLAHE(clipLimit=clipLimit, tileGridSize=tileGridSize)
