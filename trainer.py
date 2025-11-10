@@ -3,11 +3,11 @@ from tqdm.notebook import tqdm
 ###IE###
 from utils.helpers import TP_TN_FP_FN
 ###SS###
-def train_fn(model,img,gt_mask,optimizer,loss_fn,scaler,args):
+def train_fn(model,img,gt_mask,gt_skel,optimizer,loss_fn,scaler,args):
     optimizer.zero_grad()
     with torch.autocast(device_type=args["device"],dtype=torch.float16):
         pred_mask = model(img)
-        loss , loss_dict = loss_fn(pred_mask , gt_mask)
+        loss , loss_dict = loss_fn(pred_mask , gt_mask , gt_skel)
     
     scaler.scale(loss).backward()
     scaler.step(optimizer)
@@ -33,14 +33,17 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader):
         
         model.train()
         class_wise_report = False
-        for img , gt_mask in tqdm(train_loader) : 
+        for img , gt_mask ,gt_skel in tqdm(train_loader) : 
             gt_mask = gt_mask.long()
             img = img.to(device)
             gt_mask = gt_mask.to(device)
+            gt_skel = gt_skel.to(device)
+
             loss_dict , pred_mask = train_fn(
                 model = model,
                 img = img,
                 gt_mask = gt_mask,
+                gt_skel = gt_skel,
                 optimizer = optimizer,
                 loss_fn = loss_fn,
                 scaler = scaler,
@@ -89,13 +92,15 @@ def evaluation(recorder,model,loss_fn,valid_loader,class_count,class_wise_report
     total_FP = torch.zeros(class_count)
     total_FN = torch.zeros(class_count)
     
-    for img , gt_mask in valid_loader:
+    for img , gt_mask , gt_skel in valid_loader:
         gt_mask = gt_mask.long()
         img = img.to(device)
         gt_mask = gt_mask.to(device)
+        gt_skel = gt_skel.to(device)
+        
         with torch.autocast(device_type=device,dtype=torch.float16):
             pred_mask = model(img)
-            loss , loss_dict = loss_fn(pred_mask , gt_mask)
+            loss , loss_dict = loss_fn(pred_mask , gt_mask,gt_skel)
 
             loss = loss.detach().cpu().item()
             for loss_name in loss_dict:

@@ -202,7 +202,7 @@ def draw_examples(model,valid_loader,args,class_map,output_folder_path,w=6,h=6):
     img_index=1
     valid_iterator = iter(valid_loader)
     for i in tqdm(range(plot_count)):
-        img , mask = next(valid_iterator)
+        img , mask ,skel= next(valid_iterator)
         with torch.autocast(device_type=args["device"],dtype=torch.float16):
             pred_mask = model(img.to(args["device"]))
         pred_mask = pred_mask.cpu().numpy()

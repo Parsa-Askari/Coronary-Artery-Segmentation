@@ -12,13 +12,16 @@ class UnetDataset(Dataset):
     def __len__(self):
         return len(self.data)
     def __getitem__(self,index):
-        img , mask = self.data[index]
+        img , mask , skel= self.data[index]
         img = np.expand_dims(img, axis=-1) 
-        result = self.transform(image=img, mask=mask)
+        mask = mask[...,None]
+        skel = skel[...,None]
+        result = self.transform(image=img, mask=mask,mask_skeleton=skel)
         new_image = result['image']
-        new_mask = result['mask']
+        new_mask = result['mask'].squeeze(-1)
+        new_skel = result["mask_skeleton"].squeeze(-1)
 
-        return new_image.float() , new_mask
+        return new_image.float() , new_mask , new_skel.float()
 
 class UnetExampleDataset(Dataset):
     def __init__(self,transform,data,base_transform=None):
@@ -38,7 +41,7 @@ class UnetExampleDataset(Dataset):
         result = self.transform(image=img, mask=mask)
         new_image = result['image']
         new_mask = result['mask']
-
+        
         raw_result = self.base_transform(image=img, mask=mask)
         raw_image = raw_result['image']
         raw_mask = raw_result['mask']

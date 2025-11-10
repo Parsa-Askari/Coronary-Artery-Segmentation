@@ -10,14 +10,17 @@ import torch.nn as nn
 import torch
 import copy
 import matplotlib.pyplot as plt
+import zarr
 from torch.utils.data import DataLoader
+from skimage.morphology import skeletonize
 ###IE###
 from .dataset import UnetExampleDataset
 ###SS###
-def read_images(base_path, part,preprocessor, max_workers=None):
+def read_images(base_path, part,preprocessor,max_workers=None):
     base_path = Path(base_path)
     images_base = base_path / "images" / part
     labels_base = base_path / "labels" / part
+    skels_base = base_path / "skels" / part
 
     image_names = sorted([p.name for p in os.scandir(images_base) if p.is_file()])
     if(not preprocessor):
@@ -26,11 +29,15 @@ def read_images(base_path, part,preprocessor, max_workers=None):
         name_stem = Path(fname).stem
         img_path = images_base / fname
         label_path = labels_base / f"{name_stem}.zarr"
+        skel_path = skels_base / fname
+
+        skel_img = cv2.imread(str(skel_path), cv2.IMREAD_GRAYSCALE)/255.0
         img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         if(preprocessor):
             img = preprocessor(img)
         label = zarr.load(str(label_path))
-        return img, label
+
+        return img, label,skel_img
 
     if max_workers is None:
         cpu = os.cpu_count() or 4
@@ -38,8 +45,8 @@ def read_images(base_path, part,preprocessor, max_workers=None):
 
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for img, label in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
-            results.append([img, label])
+        for img, label, skel_img in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
+            results.append([img,label,skel_img])
 
     return results
 
@@ -137,4 +144,75 @@ def plot_some_images(data,transforms,image_counts=36,fig_shape=(6,6),base_transf
         plt.imshow(new_img)
         plt.title("New Image")
 
+def pre_hard_skeletonize(base_path,output_path):
+    parts = ["train","val","test"]
+    os.makedirs(os.path.join(output_path , "skels"),exist_ok=True)
+    for part in parts:
+        mask_base_path = os.path.join(base_path,"labels",part)
+        os.makedirs(os.path.join(output_path , "skels",part),exist_ok=True)
+
+        mask_list = os.listdir(mask_base_path)
+        for mask_name in tqdm(mask_list):
+            name = Path(mask_name).stem
+            mask_path = os.path.join(mask_base_path,mask_name)
+
+            mask = zarr.load(str(mask_path))
+       
+            mask = (mask!=0).astype(np.uint8)
         
+            out_skel_path = os.path.join(output_path,"skels",part,f"{name}.png")
+            skel = skeletonize(mask).astype(np.uint8) * 255
+            cv2.imwrite(out_skel_path,skel)
+@torch.no_grad()
+def pre_soft_skeletonize(base_path,output_path,batch_size=10,k=25):
+    parts = ["train","val","test"]
+    os.makedirs(os.path.join(output_path , "skels_soft"),exist_ok=True)
+    for part in parts:
+        mask_base_path = os.path.join(base_path,"labels",part)
+        os.makedirs(os.path.join(output_path , "skels_soft",part),exist_ok=True)
+
+        mask_list = os.listdir(mask_base_path)
+        mask_buffer = []
+        name_buffer = []
+        for i,mask_name in enumerate(tqdm(mask_list)):
+            name = Path(mask_name).stem
+            mask_path = os.path.join(mask_base_path,mask_name)
+            mask = zarr.load(str(mask_path))
+            mask = (mask!=0).astype(np.float32)
+
+            mask = torch.from_numpy(mask).unsqueeze(0).unsqueeze(0)
+            mask_buffer.append(mask)
+            name_buffer.append(name)
+            if((i+1)%batch_size==0 or i==len(mask_list)-1):
+                mask_buffer = torch.cat(mask_buffer,dim=0).to("cuda")
+                skels = soft_skeletonize(mask_buffer,k=k)
+                skels = skels.cpu().numpy()
+                B = skels.shape[0]
+                for i in range(B):
+                    skel = skels[i,0].astype(np.uint8)*255
+                    o_name = name_buffer[i]
+                    out_skel_path = os.path.join(
+                        output_path,"skels_soft",part,f"{o_name}.png")
+                    cv2.imwrite(out_skel_path,skel)
+                mask_buffer = []
+                name_buffer = []
+
+
+            
+
+def erode(mask):
+    h_pool = -F.max_pool2d(-mask,(3,1),(1,1),(1,0))
+    v_pool = -F.max_pool2d(-mask,(1,3),(1,1),(0,1))
+    return torch.min(v_pool,h_pool)
+def dilate(mask):
+    return F.max_pool2d(mask,(3,3),(1,1),(1,1))
+def soft_open(mask):
+    return dilate(erode(mask))
+def soft_skeletonize(I,k=25):
+    I_ = soft_open(I)
+    S = F.relu(I-I_)
+    for i in range(k):
+        I = erode(I)
+        I_ = soft_open(I)
+        S = S + (1-S)*F.relu(I-I_)
+    return S
