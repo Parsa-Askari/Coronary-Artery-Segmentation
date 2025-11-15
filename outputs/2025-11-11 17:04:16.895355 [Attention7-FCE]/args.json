@@ -1,0 +1,35 @@
+{
+    "base_path": "../arcade/nnUnet_dataset/syntax",
+    "in_c": 1,
+    "base_channel": 32,
+    "image_shape": [
+        512,
+        512
+    ],
+    "class_count": 26,
+    "attention": true,
+    "k": 40,
+    "batch_size": 10,
+    "num_workers": 10,
+    "device": "cuda",
+    "lr": 0.001,
+    "momentum": 0.9,
+    "epcohs": 100,
+    "f_int_scale": 2,
+    "full_report_cycle": 10,
+    "max_channels": 512,
+    "input_channels": 1,
+    "loss_type": "dice loss",
+    "alpha": 0.75,
+    "beta": 0.25,
+    "gamma": 1.0,
+    "f_gamma": 2.0,
+    "f_loss_scale": 1,
+    "loss_coefs": {
+        "CE": 1.0,
+        "Second": 1.0
+    },
+    "output_base_path": "./outputs",
+    "name": "Attention7-FCE",
+    "f_alpha": null
+}

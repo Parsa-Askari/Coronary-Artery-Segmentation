@@ -6,26 +6,8 @@ from tqdm import tqdm
 from pathlib import Path
 import re
 
-settings={
-    "scripts_paths":[
-        "./utils/dataset.py",
-        "./utils/helpers.py",
-        "./utils/logger.py",
-        "./utils/preprocessing.py",
-        "./utils/recorder.py",
-        "./models/nnunet_blocks.py",
-        "./models/nnunet.py",
-        "./utils/losses.py",
-        "./trainer.py"
-    ],
-    "notebook_paths":[
-        "./nnUnetAttention.ipynb"
-    ]
-}
 
-imports_list = []
-codes_list = []
-cells = []
+
 def process_scripts(paths,imports_list,codes_list):
     temp = set()
     for path in tqdm(paths):
@@ -57,7 +39,7 @@ def process_scripts(paths,imports_list,codes_list):
 def process_notebook(paths,imports_list,codes_list):
     for path in tqdm(paths):
         with open(path,"r") as f:
-            nb = nbformat.read(f, as_version=4)
+            nb = nbf.read(f, as_version=4)
         exporter = PythonExporter()
         source, _ = exporter.from_notebook_node(nb)
         with open("./temp_script.py", "w") as f:
@@ -69,19 +51,43 @@ def process_notebook(paths,imports_list,codes_list):
         )
         os.remove("./temp_script.py")
     return imports_list , codes_list
-nb = nbf.v4.new_notebook()
-imports_list , codes_list = process_scripts(
-    settings["scripts_paths"],
-    imports_list,
-    codes_list,
-)
-imports_list , codes_list = process_notebook(
-    settings["notebook_paths"],
-    imports_list,
-    codes_list
-)
 
-cells = list(imports_list) + codes_list
-nb.cells = cells
-with open("merged.ipynb", "w", encoding="utf-8") as f:
-    nbf.write(nb, f)
+def build_kaggle_project(outpath):
+    imports_list = []
+    codes_list = []
+    cells = []
+    nb = nbf.v4.new_notebook()
+    settings={
+        "scripts_paths":[
+            "./utils/dataset.py",
+            "./utils/helpers.py",
+            "./logger.py",
+            "./utils/preprocessing.py",
+            "./utils/recorder.py",
+            "./models/nnunet_blocks.py",
+            "./models/nnunet.py",
+            "./utils/losses.py",
+            "./trainer.py"
+        ],
+        "notebook_paths":[
+            "./nnUnetAttention.ipynb"
+        ]
+    }
+    imports_list , codes_list = process_scripts(
+        settings["scripts_paths"],
+        imports_list,
+        codes_list,
+    )
+    imports_list , codes_list = process_notebook(
+        settings["notebook_paths"],
+        imports_list,
+        codes_list
+    )
+
+    cells = list(imports_list) + codes_list
+    nb.cells = cells
+    path = os.path.join(outpath,"merged.ipynb")
+    with open(path, "w", encoding="utf-8") as f:
+        nbf.write(nb, f)
+if __name__ =="__main__":
+    build_kaggle_project("./")

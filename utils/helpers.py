@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import zarr
 from torch.utils.data import DataLoader
 from skimage.morphology import skeletonize
+import seaborn as sns
 ###IE###
 from .dataset import UnetExampleDataset
 ###SS###
@@ -29,15 +30,15 @@ def read_images(base_path, part,preprocessor,max_workers=None):
         name_stem = Path(fname).stem
         img_path = images_base / fname
         label_path = labels_base / f"{name_stem}.zarr"
-        skel_path = skels_base / fname
+        # skel_path = skels_base / fname
 
-        skel_img = cv2.imread(str(skel_path), cv2.IMREAD_GRAYSCALE)/255.0
+        # skel_img = cv2.imread(str(skel_path), cv2.IMREAD_GRAYSCALE)/255.0
         img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         if(preprocessor):
             img = preprocessor(img)
         label = zarr.load(str(label_path))
 
-        return img, label,skel_img
+        return img, label
 
     if max_workers is None:
         cpu = os.cpu_count() or 4
@@ -45,8 +46,8 @@ def read_images(base_path, part,preprocessor,max_workers=None):
 
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for img, label, skel_img in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
-            results.append([img,label,skel_img])
+        for img, label in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
+            results.append([img,label])
 
     return results
 
@@ -197,8 +198,45 @@ def pre_soft_skeletonize(base_path,output_path,batch_size=10,k=25):
                 mask_buffer = []
                 name_buffer = []
 
+@torch.no_grad()
+def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=None,draw_plot = True,class_count=26):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    conf_mat = torch.zeros((class_count,class_count))
+    model.eval()
+    for img , masks in tqdm(data_loader):
+        img = img.to(device)
+        with torch.autocast(device_type=device,dtype=torch.float16):
+            mask = masks[0].to(device).view(-1)
+            pred_masks = model(img)
 
-            
+        pred_mask = torch.argmax(pred_masks[0],dim=1).view(-1)
+        encoded_results = (mask*class_count + pred_mask).cpu()
+        counts = torch.bincount(encoded_results,minlength=class_count**2).view(class_count,class_count)
+        conf_mat += counts
+        
+    conf_mat = conf_mat.float() / conf_mat.sum(dim=1,keepdims=True).clamp(min=1)
+    conf_mat = conf_mat.numpy()
+    if(draw_plot):
+        class_names = ["background" for i in range(class_count)]
+        for index , name in class_maps.items():
+            class_names[index] = name
+        plt.figure(figsize=(20,20))
+        ax = sns.heatmap(
+            conf_mat,
+            annot=True,
+            fmt=".2f",
+            xticklabels=class_names,
+            yticklabels=class_names,
+            cmap="Blues"
+        )
+        ax.set_xlabel("Predicted class")
+        ax.set_ylabel("True class")
+        ax.set_title("Confusion Matrix")
+        plt.tight_layout()
+        if(output_folder_path):
+            out_path = os.path.join(output_folder_path,"conf_mat.png")
+            plt.savefig(out_path)
+    return conf_mat
 
 def erode(mask):
     h_pool = -F.max_pool2d(-mask,(3,1),(1,1),(1,0))

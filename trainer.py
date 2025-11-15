@@ -1,15 +1,43 @@
 import torch 
 from tqdm.notebook import tqdm
+import random
 ###IE###
 from utils.helpers import TP_TN_FP_FN
 ###SS###
-def train_fn(model,img,gt_mask,gt_skel,optimizer,loss_fn,scaler,args):
+def train_fn(model,img,gt_masks,optimizer,loss_fn,scaler,args,device,loss_weights=[1]):
     optimizer.zero_grad()
+    loss_dict={}
     with torch.autocast(device_type=args["device"],dtype=torch.float16):
-        pred_mask = model(img)
-        loss , loss_dict = loss_fn(pred_mask , gt_mask , gt_skel)
-    
+        pred_masks =  model(img)
+        loss = 0
+        for i,pred_mask in enumerate(pred_masks) : 
+
+            gt_mask = gt_masks[i].to(device)
+            loss_weight = loss_weights[i]
+            layer_loss , layer_loss_dict = loss_fn(pred_mask , gt_mask)
+            if(i==0):
+                loss_dict = layer_loss_dict
+                pred_mask_last = pred_mask.detach()
+                gt_mask_last = gt_mask
+            else:
+                loss_dict = {key : loss_dict[key]+ loss_weight*layer_loss_dict[key] for key in layer_loss_dict}
+
+            loss += loss_weight*layer_loss
+
     scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
+
+    if random.random() < 0.01:
+        with torch.no_grad():
+            print("--- Total Norm ---")
+            print(total_norm)
+            # print("\n--- Gradient norms ---")
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         grad_norm = param.grad.data.norm().item()
+            #         print(f"{name:30s}: {grad_norm:.6f}")
+            # print("----------------------\n")
     scaler.step(optimizer)
     scaler.update()
     
@@ -18,9 +46,9 @@ def train_fn(model,img,gt_mask,gt_skel,optimizer,loss_fn,scaler,args):
         loss_dict[loss_name] = loss_dict[loss_name].detach().cpu().item()
     
     loss_dict["total loss"] = loss
-    return loss_dict , pred_mask
+    return loss_dict , pred_mask_last , gt_mask_last
     
-def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader):
+def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,loss_weights=[1]):
     device = args["device"]
     epcohs = args["epcohs"]
     class_count = args["class_count"]
@@ -33,24 +61,24 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader):
         
         model.train()
         class_wise_report = False
-        for img , gt_mask ,gt_skel in tqdm(train_loader) : 
-            gt_mask = gt_mask.long()
+        for img , gt_masks  in tqdm(train_loader) : 
+            # gt_mask = gt_mask.long()
             img = img.to(device)
-            gt_mask = gt_mask.to(device)
-            gt_skel = gt_skel.to(device)
+            # gt_mask = gt_mask.to(device)
 
-            loss_dict , pred_mask = train_fn(
+            loss_dict , pred_mask , gt_mask = train_fn(
                 model = model,
                 img = img,
-                gt_mask = gt_mask,
-                gt_skel = gt_skel,
+                gt_masks = gt_masks,
                 optimizer = optimizer,
                 loss_fn = loss_fn,
                 scaler = scaler,
-                args = args
+                args = args,
+                device = device,
+                loss_weights = loss_weights
             )
             
-            TP , _ , FP , FN = TP_TN_FP_FN(pred_mask.detach(),gt_mask.detach(),process_preds=True)
+            TP , _ , FP , FN = TP_TN_FP_FN(pred_mask,gt_mask,process_preds=True)
             total_TP += TP
             total_FP += FP
             total_FN += FN
@@ -92,15 +120,13 @@ def evaluation(recorder,model,loss_fn,valid_loader,class_count,class_wise_report
     total_FP = torch.zeros(class_count)
     total_FN = torch.zeros(class_count)
     
-    for img , gt_mask , gt_skel in valid_loader:
-        gt_mask = gt_mask.long()
+    for img , gt_mask  in valid_loader:
         img = img.to(device)
-        gt_mask = gt_mask.to(device)
-        gt_skel = gt_skel.to(device)
+        gt_mask = gt_mask[0].to(device)
         
         with torch.autocast(device_type=device,dtype=torch.float16):
-            pred_mask = model(img)
-            loss , loss_dict = loss_fn(pred_mask , gt_mask,gt_skel)
+            pred_mask  = model(img)[0]
+            loss , loss_dict = loss_fn(pred_mask , gt_mask)
 
             loss = loss.detach().cpu().item()
             for loss_name in loss_dict:

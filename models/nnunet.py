@@ -16,6 +16,7 @@ class nnUnet(nn.Module):
         f_int_scale = args["f_int_scale"]
         max_channels = args["max_channels"]
         input_channels = args["input_channels"]
+        self.deep_super_vision = args["deep_super_vision"]
         h = image_shape[0]
         w = image_shape[1]
         
@@ -55,21 +56,28 @@ class nnUnet(nn.Module):
             self.encoders.append(EncoderBlock(in_c=input_channels,out_c=output_channels , p=1))
             input_channels = output_channels
         # build bottleneck
+
         self.bottle_neck = BottleNeck(in_c = output_channels ,out_c = self.bottle_neck_channel_setting , p=1,attention = attention)
         #build decoder
         input_channels = self.bottle_neck_channel_setting
         self.decoders = []
         for i in range(co-1):
+            
             output_channels = self.decoder_channel_settings[i]
+
             self.decoders = [
                 DecoderBlock(
                     in_c = input_channels , 
                     out_c=output_channels , 
                     gate_c = input_channels , 
                     attention = attention,
-                    f_int_scale=f_int_scale
+                    f_int_scale=f_int_scale,
+                    dsv = self.deep_super_vision,
+                    class_count=class_count
                 )] + self.decoders
+            
             input_channels = output_channels
+
 
         self.decoders = nn.ModuleList(self.decoders)
         self.attention = attention
@@ -94,47 +102,77 @@ class nnUnet(nn.Module):
             x = out
         x_in,gate_in = self.bottle_neck(x)
         
+        outputs = []
+        # print(len(self.decoders))
         for i in range(len(self.decoders) - 1, -1, -1):
+            # print("2")
             decoder = self.decoders[i]
             skip = skips[i+1]
-            x_out,gate_out = decoder(x_in,skip,gate_in)
+            x_out,gate_out,dsv_out = decoder(x_in,skip,gate_in)
+            
+            if(dsv_out!=None):
+                outputs = [dsv_out] + outputs
             x_in=x_out
             gate_in=gate_out
         # print(x_in.shape)
-        return self.head(
+        outputs = [self.head(
             x_in = x_in,
             x_skip = skips[0],
             x_gate = gate_in
-        )
-# args = {
-#     "base_path" : "../arcade/nnUnet_dataset/syntax",
-#     "in_c" : 1,
-#     "base_channel" :32,
-#     "image_shape" : (512,512),
-#     "class_count" : 26 ,
-#     "attention" : True,
-#     "batch_size" : 5,
-#     "num_workers" : 4,
-#     "device" : "cuda" if torch.cuda.is_available() else "cpu",
-#     "lr" : 0.0001,
-#     "momentum" : 0.9,
-#     "epcohs":1,
-#     "f_int_scale" : 2,
-#     "full_report_cycle" : 10,
-#     "max_channels":512,
-#     "input_channels":1,
-#     "output_base_path" : "./outputs",
-#     "name" : "NoAttention"
-# }
-# class_map = {
-#     0: '1',1: '2', 2: '3',3: '4',
-#     4: '5',5: '6',6: '7',7: '8',
-#     8: '9',9: '9a',10: '10',11: '10a',
-#     12: '11',13: '12',14: '12a',15: '13',
-#     16: '14',17: '14a',18: '15',19: '16',
-#     20: '16a',21: '16b',22: '16c',
-#     23: '12b',24: '14b'
-# }
-# model = nnUnet(args)
-# ls = torch.ones((1,1,512,512)).float()
-# print(model(ls).shape)
+        )] + outputs
+        return outputs
+if __name__ == "__main__":
+    args = {
+        "base_path" : "../arcade/nnUnet_dataset/syntax",
+        "in_c" : 1,
+        "base_channel" :32,
+        "image_shape" : (512,512),
+        "class_count" : 26 ,
+        "attention" : True,
+        "k":40,
+        "batch_size" : 10,
+        "num_workers" : 10,
+        "device" : "cuda" if torch.cuda.is_available() else "cpu",
+        "lr" : 0.01,
+        "momentum" : 0.99,
+        "weight_decay" : 3e-5,
+        "epcohs":30,
+        "f_int_scale" : 2,
+        "full_report_cycle" : 10,
+        "max_channels":512,
+        "input_channels":1,
+        "loss_type":"dice loss",
+        "alpha":0.75,
+        "beta":0.25,
+        "gamma":1.00,
+        "f_gamma":2.0,
+        "f_loss_scale":1,
+        "loss_coefs":{"CE":1.0,"Second":1.0},
+        "output_base_path" : "./outputs",
+        "name" : "Attention7-AllClass",
+        "deep_super_vision" : True
+    }
+    class_map = {
+        1: '1',2: '2', 3: '3',4: '4',
+        5: '5',6: '6',7: '7',8: '8',
+        9: '9',10: '9a',11: '10',12: '10a',
+        13: '11',14: '12',15: '12a',16: '13',
+        17: '14',18: '14a',19: '15',20: '16',
+        21: '16a',22: '16b',23: '16c',
+        24: '12b',25: '14b'
+    }
+    model = nnUnet(args).to("cuda")
+    ls = torch.ones((10,1,512,512)).float().to("cuda")
+    outs = model(ls)
+    # for out in outs:
+    #     print(out.shape)
+
+    # """
+    # torch.Size([10, 32, 256, 256])
+    # torch.Size([10, 64, 128, 128])
+    # torch.Size([10, 128, 64, 64])
+    # torch.Size([10, 256, 32, 32])
+    # torch.Size([10, 512, 16, 16])
+    # torch.Size([10, 512, 8, 8])
+    # torch.Size([10, 512, 4, 4])
+    # """

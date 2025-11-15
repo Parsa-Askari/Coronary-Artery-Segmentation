@@ -3,6 +3,8 @@ import torch
 import torch.nn.functional as F
 ###IE###
 ###SS###
+def crop_dims():
+    pass
 class Conv(nn.Module):
     def __init__(self,in_c , out_c,p):
         super(Conv,self).__init__()
@@ -19,22 +21,38 @@ class Conv(nn.Module):
         )
     def forward(self,x):
         return self.layers(x)
-
+class DownsampleConv(nn.Module):
+    def __init__(self,in_c , out_c):
+        super(DownsampleConv,self).__init__()
+        self.layers =  nn.Sequential( 
+            nn.Conv2d(
+                in_channels = in_c , 
+                out_channels = out_c ,
+                kernel_size=3, 
+                stride = 2,
+                padding=1
+            ),
+            nn.InstanceNorm2d(out_c, eps=1e-5, affine=True),
+            nn.LeakyReLU(negative_slope=1e-2, inplace=True)
+        )
+    def forward(self,x):
+        return self.layers(x)
 class EncoderBlock(nn.Module):
     def __init__(self,in_c , out_c,p=1):
         super(EncoderBlock,self).__init__()
         self.layers = nn.Sequential(
             Conv(in_c = in_c , out_c = out_c , p=p),
-            Conv(in_c = out_c , out_c = out_c , p=p)   
+            Conv(in_c = out_c , out_c=out_c ,p=p)
         )
-        self.pool = nn.MaxPool2d(kernel_size=2,stride=2)
+        self.pool =  DownsampleConv(in_c = out_c , out_c=out_c )
     def forward(self,x):
         z = self.layers(x)
         return z , self.pool(z)
 
 class DecoderBlock(nn.Module):
-    def __init__(self,in_c ,out_c , f_int_scale,gate_c = None , attention=False):
+    def __init__(self,in_c ,out_c , f_int_scale,class_count,gate_c = None , attention=False,dsv=False):
         super(DecoderBlock,self).__init__()
+        self.dsv=dsv
         self.conv1 = Conv(in_c=in_c , out_c=out_c,p=1)
         self.conv2 = Conv(in_c = out_c , out_c = out_c , p=1)
         self.upsampler = nn.ConvTranspose2d(
@@ -43,6 +61,9 @@ class DecoderBlock(nn.Module):
             kernel_size=2 ,
             stride=2
         )
+
+        if(self.dsv):
+            self.dsv_block = nn.Conv2d(in_channels=out_c,out_channels=class_count,kernel_size=1)
         #in_c * 2 = gate_c
         if(attention):
             self.gate = AttentionGate(gate_in_c=gate_c ,f_int_scale=f_int_scale,skip_in_c=in_c//2)
@@ -57,9 +78,19 @@ class DecoderBlock(nn.Module):
         z = self.conv1(x)
         gate_z = self.conv2(z)
         upsampled_z = self.upsampler(gate_z)
-        if(self.attention):
-            return upsampled_z , gate_z
-        return upsampled_z , None
+        if(self.dsv):
+            dsv_out = self.dsv_block(gate_z)
+            
+            if(self.attention):
+               
+                return upsampled_z , gate_z , dsv_out
+            else:
+                return upsampled_z , None, dsv_out 
+        else:
+            if(self.attention):
+                return upsampled_z , gate_z , None
+            else:
+                return upsampled_z , None , None
 
 class BottleNeck(nn.Module):
     def __init__(self,in_c , out_c,p,attention=False):
@@ -123,7 +154,9 @@ class AttentionGate(nn.Module):
         return padded_x*x_skip
 
 class Head(nn.Module):
-    def __init__(self,in_c ,out_c ,class_count ,f_int_scale, gate_c = None , attention=False):
+    def __init__(self,in_c ,out_c ,class_count ,f_int_scale, 
+        gate_c = None , attention=False):
+
         super(Head,self).__init__()
         self.conv1 = Conv(in_c=in_c , out_c=out_c,p=1)
         self.conv2 = Conv(in_c = out_c , out_c = out_c , p=1)
@@ -134,7 +167,11 @@ class Head(nn.Module):
         )
         
         if(attention):
-            self.gate = AttentionGate(gate_in_c=gate_c , f_int_scale=f_int_scale,skip_in_c=in_c//2)
+            self.gate = AttentionGate(
+                gate_in_c=gate_c , 
+                f_int_scale=f_int_scale,
+                skip_in_c=in_c//2
+            )
         self.attention=attention
     def forward(self,x_in,x_skip,x_gate):
         if(self.attention):
@@ -145,6 +182,7 @@ class Head(nn.Module):
         x = torch.cat([x_skip,x_in],dim=1)
         z = self.conv1(x)
         gate_z = self.conv2(z)
+        
         class_feature_maps = self.conv1x1(gate_z) 
         
         return class_feature_maps
