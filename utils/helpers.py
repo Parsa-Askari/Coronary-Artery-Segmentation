@@ -17,13 +17,16 @@ import seaborn as sns
 ###IE###
 from .dataset import UnetExampleDataset
 ###SS###
-def read_images(base_path, part,preprocessor,max_workers=None):
+def read_images(base_path, part,preprocessor,max_workers=None,train_class_counts=None):
     base_path = Path(base_path)
     images_base = base_path / "images" / part
     labels_base = base_path / "labels" / part
     skels_base = base_path / "skels" / part
 
     image_names = sorted([p.name for p in os.scandir(images_base) if p.is_file()])
+    if(train_class_counts is not None):
+        max_count = np.max(train_class_counts[1:])
+        print("max count is : ",max_count)
     if(not preprocessor):
         print("NOTE : preprocessor is not defined . no preprocessing will be used !")
     def _read_one(fname):
@@ -37,19 +40,30 @@ def read_images(base_path, part,preprocessor,max_workers=None):
         if(preprocessor):
             img = preprocessor(img)
         label = zarr.load(str(label_path))
-
-        return img, label
+        if(train_class_counts is not None):
+            u = np.unique(label)
+            min_count = np.min(train_class_counts[u])
+            weight = max_count/min_count
+        else:
+            weight = None
+        return img, label , weight
 
     if max_workers is None:
         cpu = os.cpu_count() or 4
         max_workers = min(32, cpu * 4)
 
     results = []
+    weights = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for img, label in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
+        for img, label, weight in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
             results.append([img,label])
+            weights.append(weight)
 
-    return results
+    if(train_class_counts is not None):
+        weights = torch.tensor(weights).double()
+        return results , weights
+    else:
+        return results
 
 def to_device(img,gt_mask,device,binary_mode):
     gt_mask = gt_mask.long()
@@ -96,22 +110,14 @@ def TP_TN_FP_FN(preds,gt,process_preds=True,return_TN=False):
     return TP , TN , FP , FN
 
 def draw_mask(image,mask,args=None,colors=None):
-    img = image.copy()
-    if(args is not None):
-        class_count= args["class_count"]
-    H,W,C=img.shape
-    for i in range(H):
-        for j in range(W):
-            c = mask[i,j]
-            if(c==0):
-                continue
-            if(colors is not None):
-                img[i,j] = colors[c-1]
-            else :
-                img[i,j] = (0,255,0)
-    # plt.imshow(image)
-    return img.astype(np.uint8)
+    img = image.copy().astype(np.uint8)
+    m = mask.astype(np.int64)
+    if(colors is None):
+        colors = np.array([(0,255,0)]*25,dtype=np.uint8)
+    img[m>0] = colors[m[m>0]-1]
+    return img
 
+@torch.no_grad()
 def plot_some_images(data,transforms,image_counts=36,fig_shape=(6,6),base_transforms=None):
     ds = UnetExampleDataset(transform=transforms , data=data,base_transform=base_transforms)
     dataloader = DataLoader(
@@ -135,7 +141,7 @@ def plot_some_images(data,transforms,image_counts=36,fig_shape=(6,6),base_transf
 
         x_disp = (new_img- new_img.min()) / (new_img.max() - new_img.min() + 1e-8)
         new_img = np.repeat(x_disp[..., None], 3, axis=2)*255
-        new_img = draw_mask(new_img,new_mask[0])
+        new_img = draw_mask(new_img,new_mask[0].numpy())
 
         plt.subplot(w,h,i)
         plt.imshow(old_img,cmap="gray")

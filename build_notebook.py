@@ -64,7 +64,7 @@ def build_kaggle_project(outpath):
             "./logger.py",
             "./utils/preprocessing.py",
             "./utils/recorder.py",
-            "./models/nnunet_blocks.py",
+            "./models/costume_nnunet_blocks.py",
             "./models/nnunet.py",
             "./utils/losses.py",
             "./trainer.py"

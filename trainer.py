@@ -1,6 +1,7 @@
 import torch 
 from tqdm.notebook import tqdm
 import random
+import copy
 ###IE###
 from utils.helpers import TP_TN_FP_FN
 ###SS###
@@ -28,7 +29,7 @@ def train_fn(model,img,gt_masks,optimizer,loss_fn,scaler,args,device,loss_weight
     scaler.unscale_(optimizer)
     total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
 
-    if random.random() < 0.01:
+    if random.random() < 0.001:
         with torch.no_grad():
             print("--- Total Norm ---")
             print(total_norm)
@@ -48,12 +49,15 @@ def train_fn(model,img,gt_masks,optimizer,loss_fn,scaler,args,device,loss_weight
     loss_dict["total loss"] = loss
     return loss_dict , pred_mask_last , gt_mask_last
     
-def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,loss_weights=[1]):
+def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,lr_sch=None,loss_weights=[1]):
     device = args["device"]
     epcohs = args["epcohs"]
     class_count = args["class_count"]
     full_report_cycle = args["full_report_cycle"]
-    scaler = torch.amp.GradScaler(device = device) 
+    scaler = torch.amp.GradScaler(device = device)
+    best_val_dice = float("-inf")
+    best_model = copy.deepcopy(model)
+    best_ep = 0
     for ep in tqdm(range(epcohs)):
         total_TP =  torch.zeros(class_count)
         total_FP = torch.zeros(class_count)
@@ -84,7 +88,14 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,loss
             total_FN += FN
             
             recorder.add_losses("train",loss_dict)
-            
+
+
+        current_lr = [group['lr'] for group in optimizer.param_groups][0]
+        print(f"current lr : {current_lr:.4}")
+        if(lr_sch is not None):
+            lr_sch.step()
+        
+
         dice_score = (2 * total_TP + 1e-8) / (2 * total_TP + total_FP + total_FN + 1e-8)
         precision = total_TP /(total_FP + total_TP + 1e-8) 
         recall = total_TP /(total_FN + total_TP + 1e-8) 
@@ -103,7 +114,7 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,loss
         if((ep+1)%full_report_cycle==0):
             class_wise_report=True
             
-        evaluation(
+        val_dice = evaluation(
             recorder=recorder,
             model=model,
             loss_fn=loss_fn,
@@ -112,7 +123,13 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,loss
             class_count = class_count,
             epoch=ep,
             device=device)
-            
+        if(val_dice>best_val_dice):
+            print(f"New Best! : dice = {val_dice}")
+            best_model = copy.deepcopy(model)
+            best_val_dice = val_dice
+            best_ep = ep + 1
+    print(f"best result at epoch {best_ep} with dice {best_val_dice}")
+    return best_model
 @torch.no_grad()
 def evaluation(recorder,model,loss_fn,valid_loader,class_count,class_wise_report=False,epoch=None,device="cuda"):
     model.eval()
@@ -154,3 +171,4 @@ def evaluation(recorder,model,loss_fn,valid_loader,class_count,class_wise_report
     recorder.print_loss_report("valid",epoch)
     recorder.print_metrics_report("valid",epoch,class_wise=class_wise_report)
     print("-"*60)
+    return dice_score[1:].mean().item()

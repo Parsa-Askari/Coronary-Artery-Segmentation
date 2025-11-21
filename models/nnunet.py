@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch
 import torch.nn.functional as F
 ###IE###
-from .nnunet_blocks import EncoderBlock , BottleNeck , DecoderBlock , Head
+from .costume_nnunet_blocks import EncoderBlock , BottleNeck , DecoderBlock , Head
 ###SS###
 class nnUnet(nn.Module):
     def __init__(self,args,encoder_channel_settings=None,decoder_channel_settings=None):
@@ -17,18 +17,20 @@ class nnUnet(nn.Module):
         max_channels = args["max_channels"]
         input_channels = args["input_channels"]
         self.deep_super_vision = args["deep_super_vision"]
+        unet_depth = args["unet_depth"]
         h = image_shape[0]
         w = image_shape[1]
         
-        max_pool_count = 0
         co=0
-        
-        while(w>4 and h>4):
-            w/=2
-            h/=2
-            co+=1
+        if(not unet_depth):
+            while(w>4 and h>4):
+                w/=2
+                h/=2
+                co+=1
+            
+        else:
+            co = unet_depth
         print(f"number of layers : {co}")
-
         # create encoder settings 
         if(encoder_channel_settings is None):
             self.encoder_channel_settings = [base_channel]
@@ -98,6 +100,9 @@ class nnUnet(nn.Module):
         skips = []
         for encoder in self.encoders : 
             skip , out = encoder(x)
+            # print(skip.shape)
+            # print(out.shape)
+            # print("======")
             skips += [skip]
             x = out
         x_in,gate_in = self.bottle_neck(x)
@@ -123,35 +128,37 @@ class nnUnet(nn.Module):
         return outputs
 if __name__ == "__main__":
     args = {
-        "base_path" : "../arcade/nnUnet_dataset/syntax",
-        "in_c" : 1,
-        "base_channel" :32,
-        "image_shape" : (512,512),
-        "class_count" : 26 ,
-        "attention" : True,
-        "k":40,
-        "batch_size" : 10,
-        "num_workers" : 10,
-        "device" : "cuda" if torch.cuda.is_available() else "cpu",
-        "lr" : 0.01,
-        "momentum" : 0.99,
-        "weight_decay" : 3e-5,
-        "epcohs":30,
-        "f_int_scale" : 2,
-        "full_report_cycle" : 10,
-        "max_channels":512,
-        "input_channels":1,
-        "loss_type":"dice loss",
-        "alpha":0.75,
-        "beta":0.25,
-        "gamma":1.00,
-        "f_gamma":2.0,
-        "f_loss_scale":1,
-        "loss_coefs":{"CE":1.0,"Second":1.0},
-        "output_base_path" : "./outputs",
-        "name" : "Attention7-AllClass",
-        "deep_super_vision" : True
-    }
+    "base_path" : "../arcade/nnUnet_dataset/syntax",
+    "in_c" : 1,
+    "base_channel" :32,
+    "image_shape" : (512,512),
+    "class_count" : 26 ,
+    "attention" : False,
+    "k":40,
+    "batch_size" : 10,
+    "num_workers" : 10,
+    "device" : "cuda" if torch.cuda.is_available() else "cpu",
+    "lr" : 0.01,
+    "momentum" : 0.99,
+    "weight_decay" : 3e-5,
+    "epcohs":200,
+    "f_int_scale" : 2,
+    "full_report_cycle" : 10,
+    "max_channels":512,
+    "input_channels":1,
+    "unet_depth":4,
+    "loss_type":"tversky loss",
+    "alpha":0.3,
+    "beta":0.7,
+    "t_gamma":2.00,
+    "f_gamma":2.0,
+    "f_loss_scale":1,
+    "loss_coefs":{"CE":0.5,"Second":1.0},
+    "output_base_path" : "./outputs",
+    "name" : "NoAttention7-DSV-tev-mistmatch_test",
+    "deep_super_vision" : True,
+    "f_alpha":None
+}
     class_map = {
         1: '1',2: '2', 3: '3',4: '4',
         5: '5',6: '6',7: '7',8: '8',
@@ -162,11 +169,11 @@ if __name__ == "__main__":
         24: '12b',25: '14b'
     }
     model = nnUnet(args).to("cuda")
-    ls = torch.ones((10,1,512,512)).float().to("cuda")
+    ls = torch.ones((10,1,args["image_shape"][0],args["image_shape"][1])).float().to("cuda")
     outs = model(ls)
-    # for out in outs:
-    #     print(out.shape)
-
+    for out in outs:
+        print(out.shape)
+ 
     # """
     # torch.Size([10, 32, 256, 256])
     # torch.Size([10, 64, 128, 128])

@@ -7,6 +7,8 @@ import datetime
 import os
 import json
 import shutil
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 ###IE###
 from utils.helpers import draw_mask , compute_confution_matrix
 from build_notebook import build_kaggle_project
@@ -114,7 +116,7 @@ def write_verbal_results(recorder,output_base_path):
 
             report += f"bset {loss_name} : [{best_loss}] - "
             
-
+        report+="\n"
         for index , c in recorder.class_maps.items():
             dice = recorder.metric_history[part]["dice"][index][best_idx]
             precision = recorder.metric_history[part]["precision"][index][best_idx]

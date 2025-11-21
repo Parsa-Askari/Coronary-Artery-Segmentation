@@ -57,6 +57,7 @@ class UnetExampleDataset(Dataset):
         
         self.data = data
         self.transform = transform
+        self.to_tensor = ToTensorV2()
         if(base_transform is None):
             self.base_transform = A.Compose([ToTensorV2()])
         else:
@@ -73,6 +74,8 @@ class UnetExampleDataset(Dataset):
         raw_result = self.base_transform(image=img, mask=mask)
         raw_image = raw_result['image']
         raw_mask = raw_result['mask']
+
+        new_image = self.to_tensor(image = new_image)["image"]
         return new_image.float() , new_mask , raw_image.float() , raw_mask
 
 if __name__ == "__main__":
