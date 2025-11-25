@@ -10,7 +10,7 @@ import shutil
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 ###IE###
-from utils.helpers import draw_mask , compute_confution_matrix
+from utils.helpers import draw_mask , compute_confution_matrix , to_rgb,denorm , labels_to_string
 from build_notebook import build_kaggle_project
 ###SS###
 colors = np.array([
@@ -44,7 +44,7 @@ colors = np.array([
 
 @torch.no_grad()
 def save_full_report(recorder,output_base_path,model,valid_loader,
-                     args,class_map,name=None):
+                     args,class_map,mean,std,name=None):
     now = datetime.datetime.now()
     save_folder_name = str(now)
     if(name):
@@ -72,7 +72,8 @@ def save_full_report(recorder,output_base_path,model,valid_loader,
         output_folder_path=output_folder_path
     )
     print("Saving Examples")
-    draw_examples(model,valid_loader,args,class_map,output_folder_path)
+    draw_examples(model,valid_loader,args,class_map,
+                  output_folder_path,mean=mean,std=std)
 
     print("Saving Verbal Results")
     write_verbal_results(recorder,output_folder_path)
@@ -207,37 +208,45 @@ def draw_all_metric_plots(recorder,output_folder_path):
 
 
 @torch.no_grad()
-def draw_examples(model,valid_loader,args,class_map,output_folder_path,w=6,h=6):
+def draw_examples(model,valid_loader,args,class_map,
+                  output_folder_path,mean=None,std=None,w=6,h=6):
     plt_path = os.path.join(output_folder_path,"examples.png")
     plt.figure(figsize=(30,30))
     plot_count =18
     patches = [
-        mpatches.Patch(color=np.array(colors[j-1]) / 255.0, label=class_map[j])
+        mpatches.Patch(color=np.array(colors[j-1]) / 255.0, label=f"{j}:{class_map[j]}")
         for j in range(1,len(class_map)+1)
     ]
     i=0
     img_index=1
     valid_iterator = iter(valid_loader)
     model.eval()
-    for i in tqdm(range(plot_count)):
+    for i in range(plot_count):
         img , mask = next(valid_iterator)
         with torch.autocast(device_type=args["device"],dtype=torch.float16):
             pred_masks = model(img.to(args["device"]))
-        pred_mask = pred_masks[0].cpu().numpy()
-        pred_mask = np.argmax(pred_mask,axis=1)
-        mask = mask[0].numpy()
-        img = img.numpy()
-        x_disp = (img[0,0] - img[0,0].min()) / (img[0,0].max() - img[0,0].min() + 1e-8)
-        rgb = np.repeat(x_disp[..., None], 3, axis=2)*255
-        real_annoted = draw_mask(rgb,mask[0],args,colors)
-        pred_annoted = draw_mask(rgb,pred_mask[0],args,colors)
+
+        pred_mask = pred_masks[0][0].cpu().numpy()# 26 x H , W
+        pred_mask = np.argmax(pred_mask,axis=0)# H , W
+
+        mask = mask[0][0].numpy() # H,W
+        img = img[0]# C , H , W
+
+        if(img.shape[0]==1):
+            img = to_rgb(img)
+        else : 
+            img = denorm(img,mean,std)
+        real_annoted = draw_mask(img,mask,args,colors)
+        pred_annoted = draw_mask(img,pred_mask,args,colors)
         
+        gt_classes = labels_to_string(mask)
+        pred_classes = labels_to_string(pred_mask)
         plt.subplot(h,w,img_index)
         plt.imshow(real_annoted)
-        plt.title(f"Ground Truth ")
+        plt.title(f"Ground Truth:{gt_classes}")
         plt.subplot(h,w,img_index+1)
         plt.imshow(pred_annoted)
-        plt.title(f"Predicted ")
+        plt.title(f"Predicted:{pred_classes}")
         img_index+=2
         if(img_index-1==h):
             plt.legend(

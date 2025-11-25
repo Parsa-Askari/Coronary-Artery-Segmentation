@@ -66,6 +66,8 @@ def build_kaggle_project(outpath):
             "./utils/recorder.py",
             "./models/costume_nnunet_blocks.py",
             "./models/nnunet.py",
+            "./models/swin_encoder.py",
+            "./models/swin_blocks.py",
             "./utils/losses.py",
             "./trainer.py"
         ],

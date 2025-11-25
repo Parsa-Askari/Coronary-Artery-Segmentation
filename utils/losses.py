@@ -15,17 +15,17 @@ class UnetLoss(nn.Module):
         self.f_gamma = args["f_gamma"]
         self.k = args["k"]
         self.loss_coefs = args["loss_coefs"]
-        # self.focal_fn = FocalCrossEntropy(
-        #     f_gamma=self.f_gamma,
-        #     eps=eps,
-        #     f_alpha=args["f_alpha"],
-        #     f_loss_scale = args["f_loss_scale"]
-        # )
-        if(args["f_alpha"] is not None):
-            w = torch.tensor(args["f_alpha"],dtype=torch.float32,device="cuda")
-            self.ce_fn = nn.CrossEntropyLoss(weight=w)
-        else :
-            self.ce_fn = nn.CrossEntropyLoss()
+        self.fce_fn = FocalCrossEntropy(
+            f_gamma=self.f_gamma,
+            eps=eps,
+            f_alpha=args["f_alpha"],
+            f_loss_scale = args["f_loss_scale"]
+        )
+        # if(args["f_alpha"] is not None):
+        #     w = torch.tensor(args["f_alpha"],dtype=torch.float32,device="cuda")
+        #     self.ce_fn = nn.CrossEntropyLoss(weight=w)
+        # else :
+        #     self.ce_fn = nn.CrossEntropyLoss()
         self.softmax = nn.Softmax(dim=1)
         self.eps = eps
         self.sum_dims = (0,2,3)
@@ -40,11 +40,10 @@ class UnetLoss(nn.Module):
         
         onehot_mask = F.one_hot(gt_mask, num_classes=self.class_count)
         onehot_mask = onehot_mask.permute(0, 3, 1, 2).float()  
-
         prob = self.softmax(pred_mask)
 
         # Cross Entropy Loss
-        ce_loss = self.ce_fn(pred_mask,gt_mask)
+        ce_loss = self.fce_fn(prob,onehot_mask)
         # Dice/Tversky Loss
         forground_prob = prob[:,1:]
         forground_onehot_mask = onehot_mask[:,1:]
@@ -61,7 +60,7 @@ class UnetLoss(nn.Module):
         total_loss = second_loss + ce_loss
 
         loss_dict = {
-            "CE loss" : ce_loss,
+            "FCE loss" : ce_loss,
             self.loss_type : second_loss
         }
         return total_loss , loss_dict

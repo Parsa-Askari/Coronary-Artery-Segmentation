@@ -11,7 +11,7 @@ class UnetDataset(Dataset):
         super(UnetDataset,self).__init__()
         self.data = data
         self.transform = transform
-        self.to_tensor = ToTensorV2()
+        # self.to_tensor = ToTensorV2()
         self.resizers = [
             A.Resize(base_size//(2**i),base_size//(2**i),
             interpolation=cv2.INTER_NEAREST,
@@ -21,7 +21,7 @@ class UnetDataset(Dataset):
         return len(self.data)
     def __getitem__(self,index):
         img , mask = self.data[index]
-        img = np.expand_dims(img, axis=-1) 
+        # img = np.expand_dims(img, axis=-1) 
         mask = mask[...,None]
         result = self.transform(image=img, mask=mask)
         new_image = result['image']
@@ -30,8 +30,9 @@ class UnetDataset(Dataset):
         new_masks =[new_mask] + [resizer(image = new_mask)["image"] for resizer in self.resizers]
 
 
-        new_image = self.to_tensor(image = new_image)["image"]
-        new_masks = [torch.tensor(m).long() for m in new_masks]
+        # new_image = self.to_tensor(image = new_image)["image"]
+
+        new_masks = [m.long() for m in new_masks]
         return new_image.float() , new_masks
 
 class ValidUnetDataset(Dataset):
@@ -43,7 +44,8 @@ class ValidUnetDataset(Dataset):
         return len(self.data)
     def __getitem__(self,index):
         img , mask = self.data[index]
-        img = np.expand_dims(img, axis=-1) 
+        
+        # img = np.expand_dims(img, axis=-1) 
         mask = mask[...,None]
         result = self.transform(image=img, mask=mask)
         new_image = result['image']
@@ -57,16 +59,19 @@ class UnetExampleDataset(Dataset):
         
         self.data = data
         self.transform = transform
-        self.to_tensor = ToTensorV2()
+        # self.to_tensor = ToTensorV2()
         if(base_transform is None):
-            self.base_transform = A.Compose([ToTensorV2()])
+            self.base_transform = A.Compose(
+                [ToTensorV2()]
+            )
         else:
             self.base_transform = base_transform
     def __len__(self):
         return len(self.data)
     def __getitem__(self,index):
         img , mask = self.data[index]
-        img = np.expand_dims(img, axis=-1) 
+        # img = np.expand_dims(img, axis=-1) 
+        # print(img.shape)
         result = self.transform(image=img, mask=mask)
         new_image = result['image']
         new_mask = result['mask']
@@ -75,7 +80,7 @@ class UnetExampleDataset(Dataset):
         raw_image = raw_result['image']
         raw_mask = raw_result['mask']
 
-        new_image = self.to_tensor(image = new_image)["image"]
+        # new_image = self.to_tensor(image = new_image)["image"]
         return new_image.float() , new_mask , raw_image.float() , raw_mask
 
 if __name__ == "__main__":

@@ -17,12 +17,16 @@ import seaborn as sns
 ###IE###
 from .dataset import UnetExampleDataset
 ###SS###
-def read_images(base_path, part,preprocessor,max_workers=None,train_class_counts=None):
+def read_images(base_path, part,preprocessor,in_c,max_workers=None,train_class_counts=None):
     base_path = Path(base_path)
     images_base = base_path / "images" / part
     labels_base = base_path / "labels" / part
     skels_base = base_path / "skels" / part
 
+    if(train_class_counts is not None):
+        freqs = train_class_counts / train_class_counts.sum()
+        class_w = 1 / (freqs + 1e-6)
+        class_w[0] = 0
     image_names = sorted([p.name for p in os.scandir(images_base) if p.is_file()])
     if(train_class_counts is not None):
         max_count = np.max(train_class_counts[1:])
@@ -35,17 +39,26 @@ def read_images(base_path, part,preprocessor,max_workers=None,train_class_counts
         label_path = labels_base / f"{name_stem}.zarr"
         # skel_path = skels_base / fname
 
+        if(in_c==1):
+            img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        else:
+            img = cv2.imread(str(img_path), cv2.IMREAD_COLOR_RGB)
         # skel_img = cv2.imread(str(skel_path), cv2.IMREAD_GRAYSCALE)/255.0
-        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        
         if(preprocessor):
             img = preprocessor(img)
         label = zarr.load(str(label_path))
         if(train_class_counts is not None):
-            u = np.unique(label)
-            min_count = np.min(train_class_counts[u])
-            weight = max_count/min_count
+            num_classes = class_w.shape[0]
+            counts = np.bincount(label.reshape(-1), minlength=num_classes)
+            weight = float((counts * class_w).sum())
         else:
             weight = None
+
+        # NOTE : REMOVE LATER 
+        # binary_img = label.copy()
+        # binary_img[label!=0] = 1
+        # print(binary_img.min(),binary_img.max())
         return img, label , weight
 
     if max_workers is None:
@@ -61,6 +74,8 @@ def read_images(base_path, part,preprocessor,max_workers=None,train_class_counts
 
     if(train_class_counts is not None):
         weights = torch.tensor(weights).double()
+        weights +=1e-8
+        weights /=weights.sum()
         return results , weights
     else:
         return results
@@ -109,16 +124,37 @@ def TP_TN_FP_FN(preds,gt,process_preds=True,return_TN=False):
     FN = ((onehot_gt*(1-pred_onehot)).sum(dim=(0,2,3))).cpu()
     return TP , TN , FP , FN
 
+def to_rgb(img):
+    if(isinstance(img,np.ndarray)):
+        img = torch.from_numpy(img)
+    x_disp = (img- img.min()) / (img.max() - img.min() + 1e-8)
+    img = torch.cat([x_disp,x_disp,x_disp]) *255
+    img = img.permute(2,0,1)
+    return img.numpy()
+def denorm(img,mean,std):
+    if(isinstance(img,np.ndarray)):
+        img = torch.from_numpy(img)
+    img = (img*std) + mean
+    img = img.clamp(0,1)*255
+    return img.permute(1,2,0).cpu().numpy().astype(np.uint8)
+
 def draw_mask(image,mask,args=None,colors=None):
     img = image.copy().astype(np.uint8)
     m = mask.astype(np.int64)
     if(colors is None):
         colors = np.array([(0,255,0)]*25,dtype=np.uint8)
-    img[m>0] = colors[m[m>0]-1]
+
+    c = colors[m[m>0]-1].reshape(-1,3)
+    # print("----")
+    # print(c.shape)
+    # print(img[m>0].shape)
+    img[m>0] = c
+    # print(img.shape)
     return img
 
 @torch.no_grad()
-def plot_some_images(data,transforms,image_counts=36,fig_shape=(6,6),base_transforms=None):
+def plot_some_images(data,transforms,mean,std,image_counts=36,fig_shape=(6,6),
+                     base_transforms=None):
     ds = UnetExampleDataset(transform=transforms , data=data,base_transform=base_transforms)
     dataloader = DataLoader(
         ds,
@@ -133,18 +169,27 @@ def plot_some_images(data,transforms,image_counts=36,fig_shape=(6,6),base_transf
     plt.figure(figsize=(w*5,h*5))
     for i in range(1,image_counts+1,2):
         new_imgs , new_mask , old_imgs , old_mask = next(iter_loader)
-        new_img = new_imgs[0].numpy()
-        old_img = old_imgs[0].numpy()
+   
+        new_img = new_imgs[0]
+        old_img = old_imgs[0]
         if(new_img.shape[0]==1):
-            new_img = new_img[0]
-            old_img = old_img[0]
+            new_img = to_rgb(new_img)
+            old_img = to_rgb(old_img)
 
-        x_disp = (new_img- new_img.min()) / (new_img.max() - new_img.min() + 1e-8)
-        new_img = np.repeat(x_disp[..., None], 3, axis=2)*255
+        else:
+            new_img = denorm(new_img,mean,std)
+            old_img = denorm(old_img,mean,std)
+
+        # print(new_img.shape)
+        # print(old_img.shape)
+        print(old_img.min(),old_img.max())
+        print(new_img.min(),new_img.max())
+        print("--------------")
         new_img = draw_mask(new_img,new_mask[0].numpy())
-
+        
+        # print(old_img.min(),old_img.max())
         plt.subplot(w,h,i)
-        plt.imshow(old_img,cmap="gray")
+        plt.imshow(old_img)
         plt.title("Old Image")
 
         plt.subplot(w,h,i+1)
@@ -209,7 +254,7 @@ def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=Non
     device = "cuda" if torch.cuda.is_available() else "cpu"
     conf_mat = torch.zeros((class_count,class_count))
     model.eval()
-    for img , masks in tqdm(data_loader):
+    for img , masks in data_loader:
         img = img.to(device)
         with torch.autocast(device_type=device,dtype=torch.float16):
             mask = masks[0].to(device).view(-1)
@@ -260,3 +305,17 @@ def soft_skeletonize(I,k=25):
         I_ = soft_open(I)
         S = S + (1-S)*F.relu(I-I_)
     return S
+def labels_to_string(mask,remove_bg = True,max_size =13):
+    s = 0
+    if(remove_bg):
+        s=1
+    u = np.unique(mask)[1:].tolist()
+    u = list(map(str,u))
+    c = ""
+    for i,label in enumerate(u) : 
+        c+=label
+        if((i+1)%max_size==0):
+            c+="\n"
+        else:
+            c+="|"
+    return c
