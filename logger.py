@@ -222,16 +222,18 @@ def draw_examples(model,valid_loader,args,class_map,
     valid_iterator = iter(valid_loader)
     model.eval()
     for i in range(plot_count):
-        img , mask = next(valid_iterator)
+        img,side_label,binary_mask,abs_mask,mask,skel_mask= next(valid_iterator)
         with torch.autocast(device_type=args["device"],dtype=torch.float16):
-            pred_masks = model(img.to(args["device"]))
+            pred_masks = model(img.to(args["device"]))[-1]
 
-        pred_mask = pred_masks[0][0].cpu().numpy()# 26 x H , W
+        pred_mask = pred_masks[0].cpu().numpy()# 26 x H , W
         pred_mask = np.argmax(pred_mask,axis=0)# H , W
 
-        mask = mask[0][0].numpy() # H,W
+        mask = mask[0].numpy() # H,W
         img = img[0]# C , H , W
-
+        print(img.shape)
+        print(mask.shape)
+        print(pred_mask.shape)
         if(img.shape[0]==1):
             img = to_rgb(img)
         else : 

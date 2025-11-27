@@ -27,6 +27,7 @@ class SwinEncoder(nn.Module):
         swin_head = args["swin_head"]
         swin_type = args["swin_type"]
         class_count = args["class_count"]
+        abs_class_count = args["abs_class_count"]
         in_c = args["in_c"]
         deep_super_vision  = args["deep_super_vision"]
         swin_builder , base_img_size , emb_size , depth , weight_fn = self.confs[swin_type]
@@ -42,6 +43,7 @@ class SwinEncoder(nn.Module):
                 depth=depth,
                 emb_size=emb_size,
                 class_count = class_count,
+                abs_class_count = abs_class_count,
                 deep_super_vision=deep_super_vision
 
             )

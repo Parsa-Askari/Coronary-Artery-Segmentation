@@ -14,15 +14,19 @@ import zarr
 from torch.utils.data import DataLoader
 from skimage.morphology import skeletonize
 import seaborn as sns
+import json
 ###IE###
 from .dataset import UnetExampleDataset
 ###SS###
-def read_images(base_path, part,preprocessor,in_c,max_workers=None,train_class_counts=None):
+@torch.no_grad()
+def read_images(base_path, part,preprocessor,in_c,abs_class_map,resize_binary,
+                max_workers=None,train_class_counts=None,k=40):
     base_path = Path(base_path)
     images_base = base_path / "images" / part
     labels_base = base_path / "labels" / part
     skels_base = base_path / "skels" / part
-
+    with open(f"data/{part}.json","r") as f:
+        side_labels = json.load(f)
     if(train_class_counts is not None):
         freqs = train_class_counts / train_class_counts.sum()
         class_w = 1 / (freqs + 1e-6)
@@ -37,13 +41,13 @@ def read_images(base_path, part,preprocessor,in_c,max_workers=None,train_class_c
         name_stem = Path(fname).stem
         img_path = images_base / fname
         label_path = labels_base / f"{name_stem}.zarr"
-        # skel_path = skels_base / fname
+        skel_path = skels_base / fname
 
         if(in_c==1):
             img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         else:
             img = cv2.imread(str(img_path), cv2.IMREAD_COLOR_RGB)
-        # skel_img = cv2.imread(str(skel_path), cv2.IMREAD_GRAYSCALE)/255.0
+
         
         if(preprocessor):
             img = preprocessor(img)
@@ -56,10 +60,24 @@ def read_images(base_path, part,preprocessor,in_c,max_workers=None,train_class_c
             weight = None
 
         # NOTE : REMOVE LATER 
-        # binary_img = label.copy()
-        # binary_img[label!=0] = 1
-        # print(binary_img.min(),binary_img.max())
-        return img, label , weight
+        binary_label = label.copy()
+        binary_label[label!=0] = 1
+        if(resize_binary[0]):
+            binary_label = cv2.resize(
+                binary_label,
+                (resize_binary[1][0], resize_binary[1][1]),
+                interpolation=cv2.INTER_NEAREST
+            )
+            skel_img = soft_skeletonize(
+                torch.tensor(binary_label,dtype=torch.float).unsqueeze(0).unsqueeze(0).to("cuda"),
+                k=k)
+            skel_img = skel_img.cpu()[0][0].numpy()
+
+        abs_label = label.copy()
+        for key,val in enumerate(abs_class_map):
+            abs_label[abs_label==key+1] = val
+        side_label = side_labels[name_stem]
+        return img, side_label ,binary_label , abs_label ,label,skel_img, weight
 
     if max_workers is None:
         cpu = os.cpu_count() or 4
@@ -68,8 +86,8 @@ def read_images(base_path, part,preprocessor,in_c,max_workers=None,train_class_c
     results = []
     weights = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for img, label, weight in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
-            results.append([img,label])
+        for img, side_label,binary_label , abs_label ,label,skel_img,weight in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
+            results.append([img,side_label,binary_label,abs_label,label,skel_img])
             weights.append(weight)
 
     if(train_class_counts is not None):
@@ -180,11 +198,9 @@ def plot_some_images(data,transforms,mean,std,image_counts=36,fig_shape=(6,6),
             new_img = denorm(new_img,mean,std)
             old_img = denorm(old_img,mean,std)
 
-        # print(new_img.shape)
-        # print(old_img.shape)
-        print(old_img.min(),old_img.max())
-        print(new_img.min(),new_img.max())
-        print("--------------")
+        # print(old_img.min(),old_img.max())
+        # print(new_img.min(),new_img.max())
+        # print("--------------")
         new_img = draw_mask(new_img,new_mask[0].numpy())
         
         # print(old_img.min(),old_img.max())
@@ -254,13 +270,13 @@ def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=Non
     device = "cuda" if torch.cuda.is_available() else "cpu"
     conf_mat = torch.zeros((class_count,class_count))
     model.eval()
-    for img , masks in data_loader:
+    for img,side_label,binary_mask,abs_mask,masks,skel_img in data_loader:
         img = img.to(device)
         with torch.autocast(device_type=device,dtype=torch.float16):
-            mask = masks[0].to(device).view(-1)
-            pred_masks = model(img)
+            mask = masks.to(device).view(-1)
+            pred_masks = model(img)[-1]
 
-        pred_mask = torch.argmax(pred_masks[0],dim=1).view(-1)
+        pred_mask = torch.argmax(pred_masks,dim=1).view(-1)
         encoded_results = (mask*class_count + pred_mask).cpu()
         counts = torch.bincount(encoded_results,minlength=class_count**2).view(class_count,class_count)
         conf_mat += counts

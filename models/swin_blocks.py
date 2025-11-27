@@ -18,7 +18,7 @@ class CostumeBlock(nn.Module):
     def forward(self,x):
         return self.layer(x)
 class CostumeHead(nn.Module):
-    def __init__(self,input_h,input_w,depth,emb_size,class_count,deep_super_vision):
+    def __init__(self,input_h,input_w,depth,emb_size,class_count,abs_class_count,deep_super_vision):
         super(CostumeHead,self).__init__()
         self.layers = nn.ModuleList()
         self.dsv_layers = nn.ModuleList()
@@ -27,32 +27,58 @@ class CostumeHead(nn.Module):
         self.input_h = input_h
         self.deep_super_vision = deep_super_vision
         in_c = emb_size*(2**(depth-1))
-        for i in range(depth+1):
-            out_c = in_c//2
-            self.layers.append(CostumeBlock(in_c=in_c,out_c=out_c))
-            if(self.deep_super_vision):
-                self.dsv_layers.append(nn.Conv2d(in_channels=out_c,out_channels=class_count,kernel_size=1))
-            in_c = out_c
-
-        if(len(self.dsv_layers)==0):
-            self.dsv_layers.append(nn.Conv2d(in_channels=out_c,out_channels=class_count,kernel_size=1))
         
-        scale = 2**(depth+1)
-        if(input_h//scale!=int(input_h/scale) or input_w//scale!=int(input_w/scale)):
-            self.interpolate = True
-        else :
-            self.interpolate = False
-    def forward(self,x):
-        out_features = []
-        in_z = x
-        for i,layer in enumerate(self.layers):
-            out_z = layer(in_z)
-            if(self.deep_super_vision):
-                deep_z = self.dsv_layers[i](out_z)
-                out_features =[deep_z] + out_features
-            elif (i==len(self.layers)-1):
-                deep_z = self.dsv_layers[-1](out_z)
-                out_features =[deep_z] + out_features
-            in_z = out_z
+        self.side_layer = nn.Sequential(
+            nn.Conv2d(in_channels=in_c,out_channels=1,kernel_size=5),
+            nn.AdaptiveMaxPool2d((1,1))
+        )
+        self.stage1 = CostumeBlock(in_c=in_c,out_c=in_c//2) # C//2 x H/16 x W/16
+        in_c//=2
 
-        return out_features
+        self.stage2 = CostumeBlock(in_c=in_c,out_c=in_c//2) # C//4 x H/8 x W/8
+        in_c//=2
+
+        self.stage3 = CostumeBlock(in_c=in_c,out_c=in_c//2) # C//8 x H/4 x W/4
+        in_c//=2
+        
+        self.stage4 = CostumeBlock(in_c=in_c,out_c=in_c//2) # C//16 x H/2 x W/2
+        in_c//=2
+        
+        self.binary_layer = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_c,
+                out_channels=2,
+                kernel_size=1,
+                stride=1
+            )
+        )
+
+        self.stage5 = CostumeBlock(in_c=in_c,out_c=in_c//2) # C//32 x H x W
+        in_c//=2
+
+        self.before_abs_mask_conv = nn.Conv2d(in_channels=in_c,out_channels=in_c,kernel_size=1) ## C//32 x H x W
+        self.abs_mask_conv = nn.Conv2d(in_channels=in_c,out_channels=abs_class_count,kernel_size=1)
+        self.before_mask_conv = nn.Conv2d(in_channels=in_c,out_channels=in_c,kernel_size=1)
+        self.mask_conv = nn.Conv2d(in_channels=in_c,out_channels=class_count,kernel_size=1)
+        
+        
+    def forward(self,x):
+        z_side = self.side_layer(x)
+        z = self.stage1(x)
+
+        z1 = self.stage2(z)
+        z2 = self.stage3(z1)
+        z3 = self.stage4(z2)
+        z_binary = self.binary_layer(z3)
+
+        z4 = self.stage5(z3)
+        z5 = self.before_abs_mask_conv(z4)
+        z_abs = self.abs_mask_conv(z5)
+        z6 = self.before_mask_conv(z5)
+        z_mask = self.mask_conv(z6)
+        return z_side ,z_binary ,z_abs ,z_mask
+        # torch.Size([8, 512, 24, 24]) 
+        # torch.Size([8, 256, 48, 48]) 
+        # torch.Size([8, 128, 96, 96]) 
+        # torch.Size([8, 64, 192, 192]) 
+        # torch.Size([8, 32, 384, 384])

@@ -2,38 +2,70 @@ from torch.utils.data import Dataset,DataLoader
 import numpy as np
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+import torch.nn.functional as F
 import cv2
 import torch
 ###IE###
 ###SS###
 class UnetDataset(Dataset):
-    def __init__(self,transform,data,base_size=512,out_counts=7):
+    def __init__(self,transform,data,base_size=512,valid=False):
         super(UnetDataset,self).__init__()
         self.data = data
         self.transform = transform
-        # self.to_tensor = ToTensorV2()
-        self.resizers = [
-            A.Resize(base_size//(2**i),base_size//(2**i),
-            interpolation=cv2.INTER_NEAREST,
-            mask_interpolation=cv2.INTER_NEAREST) for i in range(1,out_counts)
-        ]
+        self.to_tensor = ToTensorV2()
+        self.base_size=base_size
+        self.valid=valid
     def __len__(self):
         return len(self.data)
     def __getitem__(self,index):
-        img , mask = self.data[index]
+        img,side_label,binary_mask,abs_mask,mask,skel_img = self.data[index]
         # img = np.expand_dims(img, axis=-1) 
         mask = mask[...,None]
-        result = self.transform(image=img, mask=mask)
-        new_image = result['image']
-        new_mask = result['mask'].squeeze(-1)
+        binary_mask = binary_mask[...,None]
+        abs_mask = abs_mask[...,None]
+        skel_img = skel_img[...,None]
+        result = self.transform(
+            image=img,
+            mask=mask,
+            binary_mask = binary_mask,
+            abs_mask = abs_mask,
+            skel_img = skel_img
+        )
 
-        new_masks =[new_mask] + [resizer(image = new_mask)["image"] for resizer in self.resizers]
+        new_image = self.to_tensor(image = result['image'])["image"]
+        new_mask = self.to_tensor(mask = result['mask'])["mask"].squeeze(-1)
+        new_abs_mask = self.to_tensor(mask = result["abs_mask"])["mask"].squeeze(-1)
+        
 
+        new_binary_mask = result["binary_mask"]
+        new_skel_img = result["skel_img"]
+        new_binary_mask = cv2.resize(
+            new_binary_mask,
+            (self.base_size[0]//2, self.base_size[1]//2),
+            interpolation=cv2.INTER_NEAREST
+        )
+        new_skel_img = cv2.resize(
+            new_skel_img,
+            (self.base_size[0]//2, self.base_size[1]//2),
+            interpolation=cv2.INTER_NEAREST
+        )
 
+        new_binary_mask = self.to_tensor(mask = new_binary_mask)["mask"].squeeze(-1)
+        new_skel_img = self.to_tensor(mask =new_skel_img)["mask"].squeeze(-1)
+
+        new_binary_mask = new_binary_mask.long()
+        new_abs_mask = new_abs_mask.long()
+        new_mask = new_mask.long()
+        new_skel_img = new_skel_img.float()
         # new_image = self.to_tensor(image = new_image)["image"]
-
-        new_masks = [m.long() for m in new_masks]
-        return new_image.float() , new_masks
+        return (
+            new_image.float() , 
+            torch.LongTensor([side_label]),
+            new_binary_mask.unsqueeze(0),
+            new_abs_mask,
+            new_mask,
+            new_skel_img.unsqueeze(0)
+        )
 
 class ValidUnetDataset(Dataset):
     def __init__(self,transform,data):
@@ -43,15 +75,29 @@ class ValidUnetDataset(Dataset):
     def __len__(self):
         return len(self.data)
     def __getitem__(self,index):
-        img , mask = self.data[index]
-        
+        img,side_label,binary_mask,abs_mask,mask = self.data[index]
         # img = np.expand_dims(img, axis=-1) 
         mask = mask[...,None]
-        result = self.transform(image=img, mask=mask)
+        binary_mask = binary_mask[...,None]
+        abs_mask = abs_mask[...,None]
+
+        result = self.transform(
+            image=img,
+            mask=mask,
+            binary_mask = binary_mask,
+            abs_mask = abs_mask
+        )
         new_image = result['image']
         new_mask = result['mask'].squeeze(-1)
+        new_abs_mask = result["abs_mask"].squeeze(-1)
+        new_binary_mask = result["binary_mask"].squeeze(-1)
 
-        return new_image.float() , [new_mask.long()]
+        new_binary_mask = new_binary_mask.long()
+        new_abs_mask = new_abs_mask.long()
+        new_mask = new_mask.long()
+
+        # new_image = self.to_tensor(image = new_image)["image"]
+        return new_image.float() , side_label ,new_binary_mask , new_abs_mask , new_mask
 
 class UnetExampleDataset(Dataset):
     def __init__(self,transform,data,base_transform=None):
@@ -59,7 +105,7 @@ class UnetExampleDataset(Dataset):
         
         self.data = data
         self.transform = transform
-        # self.to_tensor = ToTensorV2()
+        self.to_tensor = ToTensorV2()
         if(base_transform is None):
             self.base_transform = A.Compose(
                 [ToTensorV2()]
@@ -69,19 +115,36 @@ class UnetExampleDataset(Dataset):
     def __len__(self):
         return len(self.data)
     def __getitem__(self,index):
-        img , mask = self.data[index]
+        img,side_label,binary_mask,abs_mask,mask = self.data[index]
         # img = np.expand_dims(img, axis=-1) 
         # print(img.shape)
-        result = self.transform(image=img, mask=mask)
-        new_image = result['image']
-        new_mask = result['mask']
+        mask = mask[...,None]
+        binary_mask = binary_mask[...,None]
+        abs_mask = abs_mask[...,None]
         
-        raw_result = self.base_transform(image=img, mask=mask)
+        result = self.transform(
+            image=img,
+            mask=mask,
+            binary_mask = binary_mask,
+            abs_mask = abs_mask
+        )
+        new_image = result['image']
+        new_mask = result['mask'].squeeze(-1)
+        new_abs_mask = result["abs_mask"].squeeze(-1)
+        new_binary_mask = result["binary_mask"].squeeze(-1)
+        
+        raw_result = self.base_transform(
+            image=img,
+            mask=mask,
+            binary_mask = binary_mask,
+            abs_mask = abs_mask
+        )
         raw_image = raw_result['image']
-        raw_mask = raw_result['mask']
-
-        # new_image = self.to_tensor(image = new_image)["image"]
-        return new_image.float() , new_mask , raw_image.float() , raw_mask
+        raw_mask = raw_result['mask'].squeeze(-1)
+        raw_abs_mask = raw_result["abs_mask"].squeeze(-1)
+        raw_binary_mask = raw_result["binary_mask"].squeeze(-1)
+        new_image = self.to_tensor(image = new_image)["image"]
+        return new_image.float() , new_mask  , raw_image.float() , raw_mask
 
 if __name__ == "__main__":
     train_transforms = A.Compose([
