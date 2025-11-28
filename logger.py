@@ -44,7 +44,7 @@ colors = np.array([
 
 @torch.no_grad()
 def save_full_report(recorder,output_base_path,model,valid_loader,
-                     args,class_map,mean,std,name=None):
+                     args,class_map,mean,std,name=None,just_binary_trining=False,use_amp=False):
     now = datetime.datetime.now()
     save_folder_name = str(now)
     if(name):
@@ -63,20 +63,31 @@ def save_full_report(recorder,output_base_path,model,valid_loader,
     draw_loss_plots(recorder , output_folder_path)
     draw_avg_metric_plots(recorder , output_folder_path)
     draw_all_metric_plots(recorder , output_folder_path)
-    compute_confution_matrix(
-        data_loader=valid_loader,
-        model = model,
-        class_maps = class_map,
-        draw_plot = True,
-        class_count=len(class_map)+1,
-        output_folder_path=output_folder_path
-    )
+    if(not just_binary_trining):
+        compute_confution_matrix(
+            data_loader=valid_loader,
+            model = model,
+            class_maps = class_map,
+            draw_plot = True,
+            class_count=len(class_map)+1,
+            output_folder_path=output_folder_path,
+            use_amp = use_amp
+            
+        )
     print("Saving Examples")
-    draw_examples(model,valid_loader,args,class_map,
-                  output_folder_path,mean=mean,std=std)
+    draw_examples(
+        model=model,
+        valid_loader=valid_loader,
+        args=args,
+        class_map=class_map,
+        output_folder_path=output_folder_path,
+        mean=mean,std=std,
+        just_binary_trining=just_binary_trining,
+        use_amp = use_amp
+    )
 
     print("Saving Verbal Results")
-    write_verbal_results(recorder,output_folder_path)
+    write_verbal_results(recorder,output_folder_path,just_binary_trining)
 
     print("Copying Notebook To Results")
     notebook_name = "nnUnetAttention.ipynb"
@@ -86,7 +97,7 @@ def save_full_report(recorder,output_base_path,model,valid_loader,
     print("builfding kaggle project")
     build_kaggle_project(output_folder_path)
 
-def write_verbal_results(recorder,output_base_path):
+def write_verbal_results(recorder,output_base_path,just_binary_trining=False):
     report = ""
     report_path = os.path.join(output_base_path,"report.txt")
     losses_keys = recorder.losses_keys
@@ -118,13 +129,14 @@ def write_verbal_results(recorder,output_base_path):
             report += f"bset {loss_name} : [{best_loss}] - "
             
         report+="\n"
-        for index , c in recorder.class_maps.items():
-            dice = recorder.metric_history[part]["dice"][index][best_idx]
-            precision = recorder.metric_history[part]["precision"][index][best_idx]
-            recall = recorder.metric_history[part]["recall"][index][best_idx]
+        if(not just_binary_trining):
+            for index , c in recorder.class_maps.items():
+                dice = recorder.metric_history[part]["dice"][index][best_idx]
+                precision = recorder.metric_history[part]["precision"][index][best_idx]
+                recall = recorder.metric_history[part]["recall"][index][best_idx]
 
-            counts = train_count[c]
-            report += f"{c} => dice : {dice} - p : {precision} - r : {recall} || train counts : {counts}\n"
+                counts = train_count[c]
+                report += f"{c} => dice : {dice} - p : {precision} - r : {recall} || train counts : {counts}\n"
         report +="<=><=><=><=><=><=><=><=><=><=><=><=><=><=><=><=><=>\n"
     with open(report_path , "w") as f : 
         f.write(report)
@@ -208,8 +220,8 @@ def draw_all_metric_plots(recorder,output_folder_path):
 
 
 @torch.no_grad()
-def draw_examples(model,valid_loader,args,class_map,
-                  output_folder_path,mean=None,std=None,w=6,h=6):
+def draw_examples(model,valid_loader,args,class_map,just_binary_trining,
+                  output_folder_path,mean=None,std=None,w=6,h=6,use_amp=False):
     plt_path = os.path.join(output_folder_path,"examples.png")
     plt.figure(figsize=(30,30))
     plot_count =18
@@ -222,24 +234,35 @@ def draw_examples(model,valid_loader,args,class_map,
     valid_iterator = iter(valid_loader)
     model.eval()
     for i in range(plot_count):
-        img,side_label,binary_mask,abs_mask,mask,skel_mask= next(valid_iterator)
-        with torch.autocast(device_type=args["device"],dtype=torch.float16):
+        img,side_label,binary_mask,abs_mask,mask= next(valid_iterator)
+        with torch.autocast(device_type=args["device"],dtype=torch.float16,enabled=use_amp):
             pred_masks = model(img.to(args["device"]))[-1]
-
+        if(just_binary_trining):
+            chosen_mask = binary_mask.squeeze(1)
+        else:
+            chosen_mask = mask
         pred_mask = pred_masks[0].cpu().numpy()# 26 x H , W
         pred_mask = np.argmax(pred_mask,axis=0)# H , W
 
-        mask = mask[0].numpy() # H,W
+        mask = chosen_mask[0].numpy() # H,W
         img = img[0]# C , H , W
-        print(img.shape)
-        print(mask.shape)
-        print(pred_mask.shape)
+
         if(img.shape[0]==1):
             img = to_rgb(img)
         else : 
             img = denorm(img,mean,std)
-        real_annoted = draw_mask(img,mask,args,colors)
-        pred_annoted = draw_mask(img,pred_mask,args,colors)
+        real_annoted = draw_mask(
+            img,
+            mask,
+            args,
+            colors = colors if not just_binary_trining else None
+        )
+        pred_annoted = draw_mask(
+            img,
+            pred_mask,
+            args,
+            colors = colors if not just_binary_trining else None
+        )
         
         gt_classes = labels_to_string(mask)
         pred_classes = labels_to_string(pred_mask)

@@ -19,7 +19,7 @@ class HistoryRecorder:
         self.class_maps =class_maps
         for part in self.history :
             self.metric_history[part]={"dice":{},"precision":{},"recall":{}}
-            for i in range(1,class_count+1):
+            for i in range(1,class_count):
                 self.metric_history[part]["dice"][i]=[]
                 self.metric_history[part]["recall"][i]=[]
                 self.metric_history[part]["precision"][i]=[]
@@ -39,7 +39,7 @@ class HistoryRecorder:
         dice = dice[1:]
         precision = precision[1:]
         recall = recall[1:]
-        for i in range(self.class_count):
+        for i in range(self.class_count-1):
             d = dice[i]
             r = recall[i]
             p = precision[i]
@@ -86,9 +86,9 @@ class HistoryRecorder:
             if(class_wise):
                 report_class_wise_temp += f"{c} => dice : {dice} p : {precision} , r : {recall}\n"
         
-        avg_dice = avg_dice/self.class_count
-        avg_precision = avg_precision/self.class_count
-        avg_recall = avg_recall/self.class_count
+        avg_dice = avg_dice/(self.class_count-1)
+        avg_precision = avg_precision/(self.class_count-1)
+        avg_recall = avg_recall/(self.class_count-1)
 
         self.metric_avg_list[part]["dice"]+=[avg_dice]
         self.metric_avg_list[part]["precision"]+=[avg_precision]

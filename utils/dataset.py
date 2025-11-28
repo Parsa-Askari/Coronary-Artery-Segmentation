@@ -18,53 +18,37 @@ class UnetDataset(Dataset):
     def __len__(self):
         return len(self.data)
     def __getitem__(self,index):
-        img,side_label,binary_mask,abs_mask,mask,skel_img = self.data[index]
+        img,side_label,binary_mask,abs_mask,mask = self.data[index]
         # img = np.expand_dims(img, axis=-1) 
         mask = mask[...,None]
         binary_mask = binary_mask[...,None]
         abs_mask = abs_mask[...,None]
-        skel_img = skel_img[...,None]
         result = self.transform(
             image=img,
             mask=mask,
             binary_mask = binary_mask,
             abs_mask = abs_mask,
-            skel_img = skel_img
         )
 
         new_image = self.to_tensor(image = result['image'])["image"]
         new_mask = self.to_tensor(mask = result['mask'])["mask"].squeeze(-1)
         new_abs_mask = self.to_tensor(mask = result["abs_mask"])["mask"].squeeze(-1)
+    
+        new_binary_mask = result["binary_mask"]
         
 
-        new_binary_mask = result["binary_mask"]
-        new_skel_img = result["skel_img"]
-        new_binary_mask = cv2.resize(
-            new_binary_mask,
-            (self.base_size[0]//2, self.base_size[1]//2),
-            interpolation=cv2.INTER_NEAREST
-        )
-        new_skel_img = cv2.resize(
-            new_skel_img,
-            (self.base_size[0]//2, self.base_size[1]//2),
-            interpolation=cv2.INTER_NEAREST
-        )
-
         new_binary_mask = self.to_tensor(mask = new_binary_mask)["mask"].squeeze(-1)
-        new_skel_img = self.to_tensor(mask =new_skel_img)["mask"].squeeze(-1)
 
         new_binary_mask = new_binary_mask.long()
         new_abs_mask = new_abs_mask.long()
         new_mask = new_mask.long()
-        new_skel_img = new_skel_img.float()
         # new_image = self.to_tensor(image = new_image)["image"]
         return (
             new_image.float() , 
             torch.LongTensor([side_label]),
             new_binary_mask.unsqueeze(0),
             new_abs_mask,
-            new_mask,
-            new_skel_img.unsqueeze(0)
+            new_mask
         )
 
 class ValidUnetDataset(Dataset):

@@ -18,7 +18,8 @@ class CostumeBlock(nn.Module):
     def forward(self,x):
         return self.layer(x)
 class CostumeHead(nn.Module):
-    def __init__(self,input_h,input_w,depth,emb_size,class_count,abs_class_count,deep_super_vision):
+    def __init__(self,input_h,input_w,depth,emb_size,
+                 class_count,abs_class_count,deep_super_vision):
         super(CostumeHead,self).__init__()
         self.layers = nn.ModuleList()
         self.dsv_layers = nn.ModuleList()
@@ -28,10 +29,6 @@ class CostumeHead(nn.Module):
         self.deep_super_vision = deep_super_vision
         in_c = emb_size*(2**(depth-1))
         
-        self.side_layer = nn.Sequential(
-            nn.Conv2d(in_channels=in_c,out_channels=1,kernel_size=5),
-            nn.AdaptiveMaxPool2d((1,1))
-        )
         self.stage1 = CostumeBlock(in_c=in_c,out_c=in_c//2) # C//2 x H/16 x W/16
         in_c//=2
 
@@ -44,39 +41,43 @@ class CostumeHead(nn.Module):
         self.stage4 = CostumeBlock(in_c=in_c,out_c=in_c//2) # C//16 x H/2 x W/2
         in_c//=2
         
-        self.binary_layer = nn.Sequential(
-            nn.Conv2d(
-                in_channels=in_c,
-                out_channels=2,
-                kernel_size=1,
-                stride=1
-            )
-        )
 
         self.stage5 = CostumeBlock(in_c=in_c,out_c=in_c//2) # C//32 x H x W
         in_c//=2
 
-        self.before_abs_mask_conv = nn.Conv2d(in_channels=in_c,out_channels=in_c,kernel_size=1) ## C//32 x H x W
-        self.abs_mask_conv = nn.Conv2d(in_channels=in_c,out_channels=abs_class_count,kernel_size=1)
-        self.before_mask_conv = nn.Conv2d(in_channels=in_c,out_channels=in_c,kernel_size=1)
-        self.mask_conv = nn.Conv2d(in_channels=in_c,out_channels=class_count,kernel_size=1)
+        self.head = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_c, 
+                out_channels=in_c//2,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.BatchNorm2d(in_c//2),
+            nn.LeakyReLU(),
+            
+
+            nn.Conv2d(
+                in_channels=in_c//2,
+                out_channels=in_c//2,
+                kernel_size=3,
+                padding=1
+            ),
+            nn.BatchNorm2d(in_c//2),
+            nn.LeakyReLU(),
+
+            nn.Conv2d(in_channels=in_c//2,out_channels=2,kernel_size=1)
+        )
         
         
     def forward(self,x):
-        z_side = self.side_layer(x)
         z = self.stage1(x)
 
         z1 = self.stage2(z)
         z2 = self.stage3(z1)
         z3 = self.stage4(z2)
-        z_binary = self.binary_layer(z3)
 
         z4 = self.stage5(z3)
-        z5 = self.before_abs_mask_conv(z4)
-        z_abs = self.abs_mask_conv(z5)
-        z6 = self.before_mask_conv(z5)
-        z_mask = self.mask_conv(z6)
-        return z_side ,z_binary ,z_abs ,z_mask
+        return [self.head(z4)]
         # torch.Size([8, 512, 24, 24]) 
         # torch.Size([8, 256, 48, 48]) 
         # torch.Size([8, 128, 96, 96]) 

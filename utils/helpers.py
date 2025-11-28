@@ -62,22 +62,12 @@ def read_images(base_path, part,preprocessor,in_c,abs_class_map,resize_binary,
         # NOTE : REMOVE LATER 
         binary_label = label.copy()
         binary_label[label!=0] = 1
-        if(resize_binary[0]):
-            binary_label = cv2.resize(
-                binary_label,
-                (resize_binary[1][0], resize_binary[1][1]),
-                interpolation=cv2.INTER_NEAREST
-            )
-            skel_img = soft_skeletonize(
-                torch.tensor(binary_label,dtype=torch.float).unsqueeze(0).unsqueeze(0).to("cuda"),
-                k=k)
-            skel_img = skel_img.cpu()[0][0].numpy()
 
         abs_label = label.copy()
         for key,val in enumerate(abs_class_map):
             abs_label[abs_label==key+1] = val
         side_label = side_labels[name_stem]
-        return img, side_label ,binary_label , abs_label ,label,skel_img, weight
+        return img, side_label ,binary_label , abs_label ,label, weight
 
     if max_workers is None:
         cpu = os.cpu_count() or 4
@@ -86,8 +76,8 @@ def read_images(base_path, part,preprocessor,in_c,abs_class_map,resize_binary,
     results = []
     weights = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for img, side_label,binary_label , abs_label ,label,skel_img,weight in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
-            results.append([img,side_label,binary_label,abs_label,label,skel_img])
+        for img, side_label,binary_label , abs_label ,label,weight in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
+            results.append([img,side_label,binary_label,abs_label,label])
             weights.append(weight)
 
     if(train_class_counts is not None):
@@ -161,8 +151,9 @@ def draw_mask(image,mask,args=None,colors=None):
     m = mask.astype(np.int64)
     if(colors is None):
         colors = np.array([(0,255,0)]*25,dtype=np.uint8)
-
-    c = colors[m[m>0]-1].reshape(-1,3)
+        c = np.array([(0,255,0)])
+    else:
+        c = colors[m[m>0]-1].reshape(-1,3)
     # print("----")
     # print(c.shape)
     # print(img[m>0].shape)
@@ -266,13 +257,13 @@ def pre_soft_skeletonize(base_path,output_path,batch_size=10,k=25):
                 name_buffer = []
 
 @torch.no_grad()
-def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=None,draw_plot = True,class_count=26):
+def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=None,draw_plot = True,class_count=26,use_amp=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     conf_mat = torch.zeros((class_count,class_count))
     model.eval()
-    for img,side_label,binary_mask,abs_mask,masks,skel_img in data_loader:
+    for img,side_label,binary_mask,abs_mask,masks in data_loader:
         img = img.to(device)
-        with torch.autocast(device_type=device,dtype=torch.float16):
+        with torch.autocast(device_type=device,dtype=torch.float16,enabled=use_amp):
             mask = masks.to(device).view(-1)
             pred_masks = model(img)[-1]
 

@@ -16,6 +16,8 @@ class MainLossFn(nn.Module):
         self.f_gamma = args["f_gamma"]
         self.k = args["k"]
         self.loss_coefs = args["loss_coefs"]
+        self.just_binary_trining = args["just_binary_trining"]
+        remove_bg = args["remove_bg"]
         entropy_fn = FocalCrossEntropy(
             f_gamma=self.f_gamma,
             eps=eps,
@@ -38,7 +40,7 @@ class MainLossFn(nn.Module):
                                         self.beta,self.t_gamma)
             
         cldice_fn = CLDiceLoss(sum_dims=self.sum_dims,eps=self.eps,k=self.k) 
-        dice_fn = DiceLoss(self.eps,self.sum_dims)
+        
         bce_fn = nn.BCEWithLogitsLoss()
         self.mask_loss_fn = MultiClassLoss(
             class_count=class_count,
@@ -54,7 +56,15 @@ class MainLossFn(nn.Module):
         
         self.binary_mask_loss_fn =BinaryClassLoss(
             cldice_fn=cldice_fn,
-            dice_fn=dice_fn
+            dice_fn=TverskyLoss(
+                self.eps,
+                self.sum_dims,
+                self.alpha,
+                self.beta,
+                self.t_gamma
+            ),
+            remove_bg = remove_bg
+            # dice_fn=DiceLoss(self.eps,self.sum_dims)
         )
         
         self.label_loss_fn = SideLoss(
@@ -64,46 +74,47 @@ class MainLossFn(nn.Module):
         
         
     def forward(self,preds , ground_truths ):
-        gt_side_label,gt_binary_mask,gt_abs_mask,gt_skel_mask,gt_mask = ground_truths
-        pred_side_label,pred_binary_mask,pred_abs_mask,pred_mask = preds
+        if(self.just_binary_trining):
+            gt_binary_mask= ground_truths[0]
+            pred_binary_mask = preds[0]
+            binary_mask_loss , dice_loss , cldice_loss , bce_loss = self.binary_mask_loss_fn(
+                pred_binary_mask = pred_binary_mask,
+                gt_binary_mask = gt_binary_mask
+            )
+            total_loss = (
+                binary_mask_loss 
+            )
+            loss_dict = {
+                "binary loss" : binary_mask_loss,
+                "bianry cldice loss ": cldice_loss,
+                "binary dice loss":dice_loss,
+                "binary BCE loss":bce_loss
+            }
+        else:
+            gt_side_label,gt_binary_mask,gt_abs_mask,gt_mask = ground_truths
+            pred_side_label ,pred_abs_mask, pred_mask = preds
         
-        # label_loss = self.label_loss_fn(
-        #     pred_label = pred_side_label,
-        #     gt_label=gt_side_label
-        # )
-        
-        
-        binary_mask_loss , dice_loss , cldice_loss , bce_loss = self.binary_mask_loss_fn(
-            pred_binary_mask = pred_binary_mask,
-            gt_binary_mask = gt_binary_mask,
-            gt_skel_mask = gt_skel_mask
-        )
-        
-        
-        # abs_mask_loss = self.abs_mask_loss_fn(
-        #     pred_mask = pred_abs_mask,
-        #     gt_mask = gt_abs_mask
-        # )
+            label_loss = self.label_loss_fn(
+                pred_label = pred_side_label,
+                gt_label=gt_side_label
+            )
+            
 
-        # mask_loss = self.mask_loss_fn(
-        #     pred_mask = pred_mask,
-        #     gt_mask = gt_mask
-        # )
-        total_loss = (
-            # mask_loss +
-            # (0.45*abs_mask_loss) + 
-            (0.3*binary_mask_loss) 
-            # (0.15*label_loss)
-        )
-        loss_dict = {
-            # "label loss" : label_loss,
-            f"binary loss" : binary_mask_loss,
-            # f"{self.loss_type}_main" : mask_loss,
-            # f"{self.loss_type}_abs" : abs_mask_loss,
-            "binary dice" : dice_loss,
-            "binary cldice" : cldice_loss ,
-            "bce loss" : bce_loss
-        }
+            abs_mask_loss = self.abs_mask_loss_fn(
+                pred_mask = pred_abs_mask,
+                gt_mask = gt_abs_mask
+            )
+
+            mask_loss = self.mask_loss_fn(
+                pred_mask = pred_mask,
+                gt_mask = gt_mask
+            )
+            loss_dict = {
+                "label loss" : label_loss,
+                f"{self.loss_type}_main" : mask_loss,
+                f"{self.loss_type}_abs" : abs_mask_loss,
+            }
+        
         return total_loss , loss_dict
     
 class MultiClassLoss(nn.Module):
@@ -143,14 +154,15 @@ class SideLoss(nn.Module):
         return en_loss
 
 class BinaryClassLoss(nn.Module):
-    def __init__(self,cldice_fn,dice_fn):
+    def __init__(self,cldice_fn,dice_fn,remove_bg):
         super(BinaryClassLoss,self).__init__()
         self.cldice_fn = cldice_fn
         self.dice_fn = dice_fn
         self.coef =0.4
         self.softmax =nn.Softmax(dim=1)
         self.cross_etropy = nn.CrossEntropyLoss()
-    def forward(self,pred_binary_mask,gt_binary_mask,gt_skel_mask):
+        self.remove_bg = remove_bg
+    def forward(self,pred_binary_mask,gt_binary_mask):
         bce_loss = self.cross_etropy(
             pred_binary_mask,
             gt_binary_mask.squeeze(1)
@@ -158,12 +170,23 @@ class BinaryClassLoss(nn.Module):
         onehot_mask = F.one_hot(gt_binary_mask.squeeze(1), num_classes=2) # B,H,W,2
         onehot_gt_binary_mask = onehot_mask.permute(0, 3, 1, 2).float()  # B,2,H,W
         prob = self.softmax(pred_binary_mask)
-        cldice_loss = self.cldice_fn(
-            binary_pred = prob[:,1:2,...],
-            binary_gt = onehot_gt_binary_mask[:,1:2,...],
-            gt_skel = gt_skel_mask
-        )
-        
+
+        if(self.remove_bg):
+            cldice_loss = self.cldice_fn(
+                binary_pred = prob[:,1:2,...],
+                binary_gt = gt_binary_mask.float()
+            )
+        else :     
+            cldice_loss_fg = self.cldice_fn(
+                binary_pred = prob[:,1:2,...],
+                binary_gt = onehot_gt_binary_mask[:,1:2,...]
+            )
+            cldice_loss_bg = self.cldice_fn(
+                binary_pred = prob[:,0:1,...],
+                binary_gt = onehot_gt_binary_mask[:,0:1,...]
+            )
+            cldice_loss = 0.5*(cldice_loss_fg+cldice_loss_bg)
+
         dice_loss = self.dice_fn(
             pred_probs = prob,
             gt = onehot_gt_binary_mask
@@ -171,7 +194,7 @@ class BinaryClassLoss(nn.Module):
         loss = (
             bce_loss + 
             (1-self.coef)*dice_loss + 
-            (self.coef)*cldice_loss 
+            (self.coef)*cldice_loss
         )
         return loss, dice_loss , cldice_loss , bce_loss
     
@@ -208,15 +231,20 @@ class CLDiceLoss(nn.Module):
         self.eps = eps
         self.sum_dims = sum_dims
 
-    def forward(self,binary_pred , binary_gt,gt_skel):
+    def forward(self,binary_pred , binary_gt):
         # print(binary_pred.shape,binary_gt.shape,gt_skel.shape)
         pred_skel = soft_skeletonize(binary_pred,k=self.k)
         gt_skel = soft_skeletonize(binary_gt,k=self.k)
-
-        t_prec = (pred_skel*binary_gt + self.eps).sum(dim=self.sum_dims)/(pred_skel.sum(dim=self.sum_dims) +self.eps)
-        t_rec = (gt_skel*binary_pred + self.eps).sum(dim=self.sum_dims)/(gt_skel.sum(dim=self.sum_dims) +self.eps)
         
-        cldice = 2*((t_prec*t_rec)/(t_prec+t_rec))
+        num_prec = (pred_skel * binary_gt).sum(dim=self.sum_dims) + self.eps
+        den_prec = pred_skel.sum(dim=self.sum_dims) + self.eps
+        t_prec   = num_prec / den_prec
+
+        num_rec = (gt_skel * binary_pred).sum(dim=self.sum_dims) + self.eps
+        den_rec = gt_skel.sum(dim=self.sum_dims) + self.eps
+        t_rec   = num_rec / den_rec
+
+        cldice = 2 * ( (t_prec * t_rec) / (t_prec + t_rec + self.eps) )
         cldice_loss = 1 - cldice.mean()
         return cldice_loss
 class DiceLoss(nn.Module):
