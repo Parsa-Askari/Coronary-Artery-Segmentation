@@ -19,14 +19,17 @@ import json
 from .dataset import UnetExampleDataset
 ###SS###
 @torch.no_grad()
-def read_images(base_path, part,preprocessor,in_c,abs_class_map,resize_binary,
-                max_workers=None,train_class_counts=None,k=40):
+def read_images(base_path, part,preprocessor,in_c,resize_binary,
+                max_workers=None,train_class_counts=None,k=40,just_binary_trining=False):
     base_path = Path(base_path)
     images_base = base_path / "images" / part
     labels_base = base_path / "labels" / part
     skels_base = base_path / "skels" / part
-    with open(f"data/{part}.json","r") as f:
+    transformed_base = base_path / "transformed" / part
+    with open(f"data/{part}_side_labels.json","r") as f:
         side_labels = json.load(f)
+    with open(f"data/{part}_fg_bboxes.json","r") as f:
+        bboxes = json.load(f)
     if(train_class_counts is not None):
         freqs = train_class_counts / train_class_counts.sum()
         class_w = 1 / (freqs + 1e-6)
@@ -41,16 +44,19 @@ def read_images(base_path, part,preprocessor,in_c,abs_class_map,resize_binary,
         name_stem = Path(fname).stem
         img_path = images_base / fname
         label_path = labels_base / f"{name_stem}.zarr"
+        t_img_path = transformed_base / f"{name_stem}.zarr"
         skel_path = skels_base / fname
-
-        if(in_c==1):
-            img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-        else:
-            img = cv2.imread(str(img_path), cv2.IMREAD_COLOR_RGB)
-
-        
+        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        # t_img = zarr.load(t_img_path)
         if(preprocessor):
-            img = preprocessor(img)
+            for p in preprocessor:
+                img = p(img)
+
+        if(in_c!=1):
+            # img = cv2.cvtColor(img,cv2.COLOR_GRAY2RGB)
+            img = np.stack([img, img, img], axis=-1)
+            # t_img = np.stack([t_img, t_img, t_img], axis=-1)*255
+
         label = zarr.load(str(label_path))
         if(train_class_counts is not None):
             num_classes = class_w.shape[0]
@@ -59,15 +65,16 @@ def read_images(base_path, part,preprocessor,in_c,abs_class_map,resize_binary,
         else:
             weight = None
 
-        # NOTE : REMOVE LATER 
-        binary_label = label.copy()
-        binary_label[label!=0] = 1
 
-        abs_label = label.copy()
-        for key,val in enumerate(abs_class_map):
-            abs_label[abs_label==key+1] = val
+
+
+        unique_labels = np.unique(label)
+        unique_labels = unique_labels[unique_labels!=0]
+
+        binary_label = (label!=0).astype(np.uint8)
         side_label = side_labels[name_stem]
-        return img, side_label ,binary_label , abs_label ,label, weight
+        bbox = bboxes[name_stem]
+        return img, label ,binary_label,bbox, weight , side_label
 
     if max_workers is None:
         cpu = os.cpu_count() or 4
@@ -75,11 +82,17 @@ def read_images(base_path, part,preprocessor,in_c,abs_class_map,resize_binary,
 
     results = []
     weights = []
+    co=0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for img, side_label,binary_label , abs_label ,label,weight in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
-            results.append([img,side_label,binary_label,abs_label,label])
+        for img, label ,binary_label,bbox, weight , side_label  in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
+            results.append([img, label ,binary_label,bbox])
             weights.append(weight)
-
+            if(just_binary_trining):
+                if(side_label==0 and co!=250):
+                    results.append([img, label ,binary_label,bbox])
+                    weights.append(weight)
+                    co+=1
+    print(co)
     if(train_class_counts is not None):
         weights = torch.tensor(weights).double()
         weights +=1e-8
@@ -106,6 +119,7 @@ def crop_dims(target , current):
     down = (current.shape[2]-target.shape[2]) - top
     croped = current[:,:,top:-down , left:-right]
     return croped
+
 def padd_dims(target , current):
     pad_h = target.shape[2] - current.shape[2] 
     pad_w = target.shape[3] - current.shape[3]
@@ -120,7 +134,7 @@ def TP_TN_FP_FN(preds,gt,process_preds=True,return_TN=False):
         pred_onehot = onehot_preds.permute(0, 3, 1, 2).float()
     else :
         pred_onehot = preds
-        
+    
     onehot_gt = F.one_hot(gt,num_classes=preds.shape[1])
     onehot_gt = onehot_gt.permute(0, 3, 1, 2).float()
     TN = 0
@@ -136,8 +150,10 @@ def to_rgb(img):
     if(isinstance(img,np.ndarray)):
         img = torch.from_numpy(img)
     x_disp = (img- img.min()) / (img.max() - img.min() + 1e-8)
-    img = torch.cat([x_disp,x_disp,x_disp]) *255
-    img = img.permute(2,0,1)
+    
+    img = torch.cat([x_disp,x_disp,x_disp],dim=0) *255
+    # print("d",img.shape)
+    img = img.permute(1,2,0)
     return img.numpy()
 def denorm(img,mean,std):
     if(isinstance(img,np.ndarray)):
@@ -152,8 +168,11 @@ def draw_mask(image,mask,args=None,colors=None):
     if(colors is None):
         colors = np.array([(0,255,0)]*25,dtype=np.uint8)
         c = np.array([(0,255,0)])
+        
     else:
+        
         c = colors[m[m>0]-1].reshape(-1,3)
+        
     # print("----")
     # print(c.shape)
     # print(img[m>0].shape)
@@ -261,11 +280,11 @@ def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=Non
     device = "cuda" if torch.cuda.is_available() else "cpu"
     conf_mat = torch.zeros((class_count,class_count))
     model.eval()
-    for img,side_label,binary_mask,abs_mask,masks in data_loader:
+    for img, masks in data_loader:
         img = img.to(device)
         with torch.autocast(device_type=device,dtype=torch.float16,enabled=use_amp):
-            mask = masks.to(device).view(-1)
-            pred_masks = model(img)[-1]
+            mask = masks[0].to(device).view(-1)
+            pred_masks = model(img)[0]
 
         pred_mask = torch.argmax(pred_masks,dim=1).view(-1)
         encoded_results = (mask*class_count + pred_mask).cpu()
@@ -326,3 +345,110 @@ def labels_to_string(mask,remove_bg = True,max_size =13):
         else:
             c+="|"
     return c
+
+def make_fg_bboxes(parts,base_path,space=10):
+    for part in parts:
+        print(f"processing {part}")
+        main_path = os.path.join(base_path,f"{part}.json")
+        out_path = os.path.join(base_path,f"{part}_fg_bboxes.json")
+        ls={}
+
+        with open(main_path , "r") as f:
+            train_json = json.load(f)
+        for path , data in tqdm(train_json.items()):
+            name = Path(path).stem
+            bbox_norm = data["bbox_norm"]
+            x_min = float("inf")
+            y_min = float("inf")
+            x_max = 0
+            y_max = 0
+            for bbox in bbox_norm:
+                x1,y1 = bbox[0:2]
+                x2 = x1 + bbox[2]
+                y2 = y1 + bbox[3]
+                x_min = min(x_min,x1)
+                y_min = min(y_min,y1)
+                x_max = max(x_max,x2)
+                y_max = max(y_max,y2)
+
+            x_min = int(max(0,x_min-space))
+            y_min = int(max(0,y_min-space))
+            x_max = int(min(511,x_max+space))
+            y_max = int(min(511,y_max+space))
+
+            ls[name] = [x_min,y_min,x_max,y_max]
+        with open(out_path,"w") as f:
+            json.dump(ls,f)
+# make_fg_bboxes(base_path="../data/",parts=["train","val","test"],space=25)
+def bbox_infoes(parts , base_path):
+    for part in parts:
+        print(f"for {part}")
+        path = os.path.join(base_path , f"{part}_fg_bboxes.json")
+        with open( path, "r") as f : 
+            data = json.load(f)
+        bboxes = [[],[],[],[]]
+        for key , bbox in data.items():
+            bboxes[0] += [bbox[0]]
+            bboxes[1] += [bbox[1]]
+            bboxes[2] += [bbox[2]]
+            bboxes[3] += [bbox[3]]
+
+        mean_xmin , med_xmin  = np.mean(bboxes[0]) , np.median(bboxes[0])
+        mean_ymin , med_ymin = np.mean(bboxes[1]) , np.median(bboxes[1])
+        mean_xmax , med_xmax = np.mean(bboxes[2]) , np.median(bboxes[2])
+        mean_ymax , med_ymax = np.mean(bboxes[3]) , np.median(bboxes[3])
+
+        max_xmin , min_xmin  = np.max(bboxes[0]) , np.min(bboxes[0])
+        max_ymin , min_ymin = np.max(bboxes[1]) , np.min(bboxes[1])
+        max_xmax , min_xmax = np.max(bboxes[2]) , np.min(bboxes[2])
+        max_ymax , min_ymax = np.max(bboxes[3]) , np.min(bboxes[3])
+
+
+        print(f"mean = {mean_xmin} , {mean_ymin} , {mean_xmax} , {mean_ymax}")
+        print(f"median = {med_xmin} , {med_ymin} , {med_xmax} , {med_ymax}")
+        print(f"min = {min_xmin} , {min_ymin} , {min_xmax} , {min_ymax}")
+        print(f"max = {max_xmin} , {max_ymin} , {max_xmax} , {max_ymax}")
+        print("-"*100)
+# bbox_infoes(parts=["train","val","test"],base_path="../data/")
+
+def class_weighting(method,class_counts,**kwargs):
+    if(kwargs["use_pixel_counts"]):
+        print("using pixel counts")
+        with open("./data/train_pixel_counts.json","r") as f:
+            train_class_counts = json.load(f)
+        counts = [0]*(len(train_class_counts))
+        for k,v in train_class_counts.items():
+            counts[int(k)] = int(v)
+        counts = np.array(counts,dtype=np.float64)
+    else :
+        print("using class counts")
+        counts = np.array(class_counts,dtype=np.float64)
+
+    if(method=="median"):
+        print("median weights being used")
+        median_count = np.median(counts)
+        weights = median_count/np.array(counts)
+        
+    elif(method=="log"):
+        print("log weights being used")
+        total = np.sum(counts)
+        weights = np.log(total/np.array(counts))
+        weights = (weights / weights.mean())
+        weights[0]=0.1
+    elif(method=="beta"):
+        print("beta weights being used")
+        b = kwargs["b"]
+        weights = (1-b)/(1-np.power(b,counts))
+        weights = weights / weights.sum()
+        weights[12] = 0.25
+    else:
+        print("no class weights being used")
+        return None
+    return weights.tolist()
+
+@torch.no_grad()
+def freeze_binary_encoder(binary_encoder):
+    
+    for param in binary_encoder.parameters():
+        param.requires_grad = False
+    return binary_encoder

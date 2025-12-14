@@ -1,0 +1,8 @@
+(figsize=(20,20))
+plt.subplot(2,2,1)
+plt.imshow(img,cmap="gray")
+plt.subplot(2,2,2)
+plt.imshow(img1,cmap="gray")
+plt.subplot(2,2,3)
+plt.imshow(img2,cmap="gray")
+plt.show()

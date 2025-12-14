@@ -15,9 +15,10 @@ class nnUnet(nn.Module):
         base_channel = args["base_channel"]
         f_int_scale = args["f_int_scale"]
         max_channels = args["max_channels"]
-        input_channels = args["input_channels"]
+        input_channels = args["in_c"]
         self.deep_super_vision = args["deep_super_vision"]
         unet_depth = args["unet_depth"]
+        dsv_bottleneck = args["dsv_bottleneck"]
         h = image_shape[0]
         w = image_shape[1]
         
@@ -74,7 +75,7 @@ class nnUnet(nn.Module):
                     gate_c = input_channels , 
                     attention = attention,
                     f_int_scale=f_int_scale,
-                    dsv = self.deep_super_vision,
+                    dsv = self.deep_super_vision if i!=0 else dsv_bottleneck,
                     class_count=class_count
                 )] + self.decoders
             
@@ -128,36 +129,45 @@ class nnUnet(nn.Module):
         return outputs
 if __name__ == "__main__":
     args = {
-    "base_path" : "../arcade/nnUnet_dataset/syntax",
-    "in_c" : 1,
+    "base_path" : "./dataset/syntax",
+    "in_c" : 3,
     "base_channel" :32,
-    "image_shape" : (512,512),
-    "class_count" : 26 ,
-    "attention" : False,
+    "image_shape" : (448,448),
+    "abs_class_count":17,
+    "attention" : True,
     "k":40,
-    "batch_size" : 10,
-    "num_workers" : 10,
+    "batch_size" : 7,
+    "num_workers" : 5,
     "device" : "cuda" if torch.cuda.is_available() else "cpu",
-    "lr" : 0.01,
+    "lr" : 0.0005,
     "momentum" : 0.99,
-    "weight_decay" : 3e-5,
-    "epcohs":200,
+    "crop_prob": 0,
+    "weight_decay" : 0.001,
+    "epcohs":30,
     "f_int_scale" : 2,
     "full_report_cycle" : 10,
     "max_channels":512,
-    "input_channels":1,
-    "unet_depth":4,
+    "unet_depth":6,
     "loss_type":"tversky loss",
-    "alpha":0.3,
-    "beta":0.7,
-    "t_gamma":2.00,
+    "alpha":0.7,
+    "beta":0.3,
+    "t_gamma":2.0,
     "f_gamma":2.0,
-    "f_loss_scale":1,
-    "loss_coefs":{"CE":0.5,"Second":1.0},
+    "resize_binary":[True,(224,224)],
+    "loss_coefs":{"CE":1.0,"Second":1.0},
+    "swin_head" : "costume",
+    "swin_type":"swin_v2_s",
     "output_base_path" : "./outputs",
-    "name" : "NoAttention7-DSV-tev-mistmatch_test",
+    "name" : "both-amp32-b3a7-no_crop-dsv",
     "deep_super_vision" : True,
-    "f_alpha":None
+    "just_binary_trining":True,
+    "use_sch":True,
+    "use_amp":False,
+    "f_alpha":None,
+    "remove_bg":True,
+    "binary_type":"both",
+
+
 }
     class_map = {
         1: '1',2: '2', 3: '3',4: '4',
@@ -169,7 +179,7 @@ if __name__ == "__main__":
         24: '12b',25: '14b'
     }
     model = nnUnet(args).to("cuda")
-    ls = torch.ones((10,1,args["image_shape"][0],args["image_shape"][1])).float().to("cuda")
+    ls = torch.ones((10,3,args["image_shape"][0],args["image_shape"][1])).float().to("cuda")
     outs = model(ls)
     for out in outs:
         print(out.shape)

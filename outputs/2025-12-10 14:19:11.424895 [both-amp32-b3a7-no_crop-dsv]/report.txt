@@ -1,0 +1,10 @@
+======= > train verbal Report < =======
+best epoch : [30]
+best dice : [0.8023110628128052] - best precision : [0.7650773525238037] - best recall : [0.8433542847633362] 
+bset total loss : [0.28852505043148996] - bset binary loss : [0.28852505043148996] - bset binary dice loss : [0.15365196965634823] - bset binary BCE loss : [0.13487307712435723] - 
+<=><=><=><=><=><=><=><=><=><=><=><=><=><=><=><=><=>
+======= > valid verbal Report < =======
+best epoch : [27]
+best dice : [0.8096874952316284] - best precision : [0.8019792437553406] - best recall : [0.8175453543663025] 
+bset total loss : [0.3186089538037777] - bset binary loss : [0.3186089538037777] - bset binary dice loss : [0.13945500925183296] - bset binary BCE loss : [0.17915394268929957] - 
+<=><=><=><=><=><=><=><=><=><=><=><=><=><=><=><=><=>

@@ -2,3 +2,6 @@ __pycache__/
 dataset/
 *.pth
 *.html
+vessel_metrics/
+syntax-processed/
+syntax/
