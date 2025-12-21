@@ -4,9 +4,11 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from torch.utils.data import WeightedRandomSampler
 import torch.nn.functional as F
+from tqdm.notebook import tqdm
 import cv2
 import torch
 import random
+from torch.utils.data import Sampler
 ###IE###
 from .preprocessing import crop_with_bbox
 ###SS###
@@ -19,6 +21,43 @@ class ToTensor:
         x = torch.from_numpy(x)
         x = x.permute(2,0,1)
         return x
+
+class GroupPickSampler(Sampler):
+    def __init__(self, group_to_idxs, seed=0, extras_per_group=1):
+        self.group_to_idxs = group_to_idxs
+        self.seed = seed
+        self.epoch = 0
+        self.extras_per_group = extras_per_group
+
+        self._len = 0
+        for idxs in group_to_idxs:
+            self._len += 1 
+            self._len += min(extras_per_group, max(0, len(idxs)-1))
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+
+        order = torch.randperm(len(self.group_to_idxs), generator=g).tolist()
+
+        for i in order:
+            idxs = self.group_to_idxs[i]
+
+            yield idxs[0]  # anchor
+
+            rest = idxs[1:]
+            if rest:
+                k = min(self.extras_per_group, len(rest))
+                pick = torch.randperm(len(rest), generator=g)[:k].tolist()
+                for j in pick:
+                    yield rest[j]
+
+    def __len__(self):
+        return self._len
+    
 class UnetDataset(Dataset):
     def __init__(self,transform,data,crop_prob=0.33,base_size=512,
                  valid=False,out_counts=1,just_binary_trining=True,binary_type="both"):
@@ -38,10 +77,11 @@ class UnetDataset(Dataset):
             ) for i in range(1,out_counts)
         ]
         self.binary_type = binary_type
+    
     def __len__(self):
         return len(self.data)
     def __getitem__(self,index):
-        img, multi_mask ,binary_mask,bbox= self.data[index]
+        img, multi_mask ,binary_mask,bbox,name_stem= self.data[index]
         if(not self.valid):
             if(random.random()<self.crop_prob ):
                 img, multi_mask ,binary_mask= crop_with_bbox(
@@ -161,7 +201,7 @@ class UnetExampleDataset(Dataset):
         new_image = self.to_tensor(image = new_image)["image"]
         return new_image.float() , new_mask  , raw_image.float() , raw_mask
     
-def make_dataloader(data,args,valid=False,sampler_weights=None):
+def make_dataloader(data,args,valid=False,sampler_weights=None,sampler=None):
     if(sampler_weights is not None):
         print("using weighted sampler here")
         sampler = WeightedRandomSampler(sampler_weights, len(sampler_weights))
@@ -173,7 +213,16 @@ def make_dataloader(data,args,valid=False,sampler_weights=None):
             shuffle=False,
             sampler=sampler
         )
-        
+    elif(sampler is not None):
+        print("using costum sampler here")
+        dataloader = DataLoader(
+            data,
+            batch_size = args["batch_size"] ,
+            num_workers = args["num_workers"] ,
+            pin_memory=True,
+            shuffle=False,
+            sampler=sampler
+        )
     else : 
         if(valid):
             print("valid with no sampler")

@@ -100,7 +100,7 @@ def save_full_report(recorder,output_base_path,model,valid_loader,binary_type,
         else:
             notebook_name = "nnUnetAttention.ipynb"
     else:
-        notebook_name = "nnUnetAttention.ipynb"
+        notebook_name = "multi_main.ipynb"
     notebook_out_path = os.path.join(output_folder_path,"notebook.ipynb") 
     shutil.copyfile(f"./{notebook_name}",notebook_out_path )
     print("builfding kaggle project")

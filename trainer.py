@@ -23,7 +23,7 @@ def model_sanity_check(model,loss,total_norm):
             #     f.write(f"{loss.detach().item()},{total_norm.detach().item()}\n")
             print(loss,total_norm)
 
-            if(random.random() < 0.05):
+            if(random.random() < 0):
                 print("\n--- Gradient norms ---")
                 for name, param in model.named_parameters():
                     if param.grad is not None:
@@ -101,7 +101,7 @@ def train_fn(model,img,ground_truths,optimizer,loss_fn,scaler,args,device,loss_w
 
 
 def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,
-            lr_sch=None,loss_weights=[1],binary_encoder=None):
+            lr_sch=None,loss_weights=[1],binary_encoder=None,sampler=None):
     device = args["device"]
     epcohs = args["epcohs"]
     class_count = args["class_count"]
@@ -115,6 +115,8 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,
     best_model = copy.deepcopy(model)
     best_ep = 0
     for ep in tqdm(range(epcohs)):
+        if(sampler is not None):
+            sampler.set_epoch(ep)
         total_TP =  torch.zeros(class_count)
         total_FP = torch.zeros(class_count)
         total_FN = torch.zeros(class_count)

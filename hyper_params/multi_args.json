@@ -1,31 +1,31 @@
 {
     "base_path": "./dataset/syntax",
-    "in_c": 1,
+    "in_c": 2,
     "base_channel": 32,
     "image_shape": [
-        448,
-        448
+        512,
+        512
     ],
     "abs_class_count": 17,
     "attention": true,
     "k": 40,
-    "batch_size": 10,
+    "batch_size": 8,
     "num_workers": 5,
     "device": "cuda",
     "lr": 0.01,
     "momentum": 0.99,
     "crop_prob": 0,
-    "weight_decay": 0.001,
-    "epcohs": 30,
+    "weight_decay": 3e-05,
+    "epcohs": 200,
     "f_int_scale": 2,
     "full_report_cycle": 10,
     "max_channels": 512,
     "unet_depth": 6,
     "loss_type": "tversky loss",
-    "alpha": 0.7,
-    "beta": 0.3,
+    "alpha": 0.8,
+    "beta": 0.2,
     "t_gamma": 2.0,
-    "f_gamma": 2.0,
+    "f_gamma": 1.0,
     "resize_binary": [
         true,
         [
@@ -49,5 +49,5 @@
     "remove_bg": true,
     "dsv_bottleneck":false,
     "binary_type": "both",
-    "multi_type":"og" 
+    "multi_type":"prob" 
 }

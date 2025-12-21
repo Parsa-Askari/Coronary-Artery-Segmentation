@@ -1,0 +1,53 @@
+{
+    "base_path": "./dataset/syntax",
+    "in_c": 1,
+    "base_channel": 32,
+    "image_shape": [
+        512,
+        512
+    ],
+    "abs_class_count": 17,
+    "attention": true,
+    "k": 40,
+    "batch_size": 10,
+    "num_workers": 5,
+    "device": "cuda",
+    "lr": 0.0005,
+    "momentum": 0.99,
+    "crop_prob": 0,
+    "weight_decay": 0.001,
+    "epcohs": 10,
+    "f_int_scale": 2,
+    "full_report_cycle": 10,
+    "max_channels": 512,
+    "unet_depth": 6,
+    "loss_type": "tversky loss",
+    "alpha": 0.7,
+    "beta": 0.3,
+    "t_gamma": 2.0,
+    "f_gamma": 2.0,
+    "resize_binary": [
+        true,
+        [
+            224,
+            224
+        ]
+    ],
+    "loss_coefs": {
+        "CE": 1.0,
+        "Second": 1.0
+    },
+    "swin_head": "costume",
+    "swin_type": "swin_v2_s",
+    "output_base_path": "./outputs",
+    "name": "test",
+    "deep_super_vision": true,
+    "just_binary_trining": true,
+    "use_sch": false,
+    "use_amp": false,
+    "f_alpha": null,
+    "remove_bg": true,
+    "dsv_bottleneck": false,
+    "binary_type": "both",
+    "class_count": 2
+}

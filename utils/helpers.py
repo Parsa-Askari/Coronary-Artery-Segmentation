@@ -20,16 +20,20 @@ from .dataset import UnetExampleDataset
 ###SS###
 @torch.no_grad()
 def read_images(base_path, part,preprocessor,in_c,resize_binary,
-                max_workers=None,train_class_counts=None,k=40,just_binary_trining=False):
+                max_workers=None,train_class_counts=None,k=40,
+                just_binary_trining=False,resizer=None,rare=None):
     base_path = Path(base_path)
     images_base = base_path / "images" / part
     labels_base = base_path / "labels" / part
     skels_base = base_path / "skels" / part
     transformed_base = base_path / "transformed" / part
-    with open(f"data/{part}_side_labels.json","r") as f:
+    
+    with open(f"./data/{part}_side_labels.json","r") as f:
         side_labels = json.load(f)
-    with open(f"data/{part}_fg_bboxes.json","r") as f:
+    with open(f"./data/{part}_fg_bboxes.json","r") as f:
         bboxes = json.load(f)
+    with open(f"./data/{part}.json","r") as f:
+        metadata = json.load(f)
     if(train_class_counts is not None):
         freqs = train_class_counts / train_class_counts.sum()
         class_w = 1 / (freqs + 1e-6)
@@ -65,16 +69,15 @@ def read_images(base_path, part,preprocessor,in_c,resize_binary,
         else:
             weight = None
 
-
-
-
         unique_labels = np.unique(label)
         unique_labels = unique_labels[unique_labels!=0]
 
         binary_label = (label!=0).astype(np.uint8)
         side_label = side_labels[name_stem]
         bbox = bboxes[name_stem]
-        return img, label ,binary_label,bbox, weight , side_label
+        all_bboxes = metadata[name_stem]["bbox_norm"]
+        all_labels = metadata[name_stem]["labels"]
+        return img, label ,binary_label,bbox, weight , side_label , all_bboxes , all_labels , name_stem
 
     if max_workers is None:
         cpu = os.cpu_count() or 4
@@ -82,17 +85,35 @@ def read_images(base_path, part,preprocessor,in_c,resize_binary,
 
     results = []
     weights = []
+    ls=[]
     co=0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for img, label ,binary_label,bbox, weight , side_label  in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
-            results.append([img, label ,binary_label,bbox])
-            weights.append(weight)
-            if(just_binary_trining):
-                if(side_label==0 and co!=250):
-                    results.append([img, label ,binary_label,bbox])
-                    weights.append(weight)
-                    co+=1
-    print(co)
+        for img, label ,binary_label,bbox, weight , side_label , all_bboxes , all_labels , name_stem  in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
+            if(part=="train" and resizer is not None):
+                current_results , current_weights ,flag=crop_around_rare(
+                    img, 
+                    label ,
+                    binary_label,
+                    bbox, 
+                    weight , 
+                    side_label ,
+                    all_bboxes , 
+                    all_labels,
+                    name_stem,
+                    rare,
+                    resizer
+                )
+                if(flag):
+                    ls.append(name_stem)
+                co+=flag
+            else:
+                current_results = [[[img, label ,binary_label,bbox,name_stem]]]
+                current_weights = [weight]
+            results+=current_results
+            weights+=current_weights
+
+    print("f",co)
+
     if(train_class_counts is not None):
         weights = torch.tensor(weights).double()
         weights +=1e-8
@@ -100,6 +121,52 @@ def read_images(base_path, part,preprocessor,in_c,resize_binary,
         return results , weights
     else:
         return results
+    
+def crop_around_rare(img, label ,binary_label,bbox, weight , side_label ,all_bboxes , all_labels,name_stem,rare_labels,resizer):
+    current_results = [[img, label ,binary_label,bbox,name_stem]]
+    current_weights = [weight]
+    flag=0
+    for i,l in enumerate(all_labels):
+        if l in rare_labels:
+            rx_up = all_bboxes[i][0]
+            ry_up = all_bboxes[i][1]
+            rx_down = rx_up + all_bboxes[i][2]
+            ry_down = ry_up + all_bboxes[i][3]
+
+            tx_up = bbox[0]
+            ty_up = bbox[1]
+            tx_down = bbox[2]
+            ty_down = bbox[3]
+
+            x_up_margin = (rx_up - tx_up)//2
+            y_up_margin = (ry_up - ty_up)//2
+            x_down_margin = (tx_down - rx_down)//2
+            y_down_margin = (ty_down - ry_down)//2
+
+            rx_up = int(max(0,rx_up - x_up_margin))
+            ry_up = int(max(0,ry_up - y_up_margin))
+            rx_down = int(min(tx_down,rx_down + x_down_margin))
+            ry_down = int(min(ty_down,ry_down + y_down_margin))
+    
+            # res = resizer(
+            #     image=img[ry_up:ry_down,rx_up:rx_down,None],
+            #     mask=label[ry_up:ry_down,rx_up:rx_down,None],
+            #     binary_mask = binary_label[ry_up:ry_down,rx_up:rx_down,None]
+            # )
+            new_img = np.zeros_like(img)
+            new_binary_label = np.zeros_like(binary_label)
+            new_label = np.zeros_like(label)
+            
+            new_img[ry_up:ry_down,rx_up:rx_down] = img[ry_up:ry_down,rx_up:rx_down]
+            new_binary_label[ry_up:ry_down,rx_up:rx_down]=binary_label[ry_up:ry_down,rx_up:rx_down]
+            new_label[ry_up:ry_down,rx_up:rx_down]=label[ry_up:ry_down,rx_up:rx_down]
+
+            
+            current_results += [[new_img.copy(), new_label.copy() ,new_binary_label.copy(),[0,0,511,511],name_stem]]
+            current_weights += [weight]
+            flag=1
+    
+    return [current_results],current_weights,flag
 
 def to_device(img,gt_mask,device,binary_mode):
     gt_mask = gt_mask.long()
