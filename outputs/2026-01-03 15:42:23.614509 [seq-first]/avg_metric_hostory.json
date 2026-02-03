@@ -1,0 +1,12 @@
+{
+    "train": {
+        "dice": [],
+        "precision": [],
+        "recall": []
+    },
+    "valid": {
+        "dice": [],
+        "precision": [],
+        "recall": []
+    }
+}

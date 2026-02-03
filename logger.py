@@ -10,7 +10,10 @@ import shutil
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 ###IE###
-from utils.helpers import draw_mask , compute_confution_matrix , to_rgb,denorm , labels_to_string
+from utils.helpers import (
+    draw_mask , compute_confution_matrix ,no_teacher_forcing_pipeline,
+    process_targets , make_example_datasets
+)
 from build_notebook import build_kaggle_project
 ###SS###
 colors = np.array([
@@ -43,8 +46,9 @@ colors = np.array([
 
 
 @torch.no_grad()
-def save_full_report(recorder,output_base_path,model,valid_loader,binary_type,
-                     args,class_map,mean,std,name=None,just_binary_trining=False,use_amp=False):
+def save_full_report(recorder,output_base_path,model,valid_loader,
+                     args,class_map,valid_images,test_transforms,
+                     class_count,device,name=None,notebook_name="Multi_Main"):
     now = datetime.datetime.now()
     save_folder_name = str(now)
     if(name):
@@ -63,50 +67,37 @@ def save_full_report(recorder,output_base_path,model,valid_loader,binary_type,
     draw_loss_plots(recorder , output_folder_path)
     draw_avg_metric_plots(recorder , output_folder_path)
     draw_all_metric_plots(recorder , output_folder_path)
-    if(not just_binary_trining):
-        compute_confution_matrix(
-            data_loader=valid_loader,
-            model = model,
-            class_maps = class_map,
-            draw_plot = True,
-            class_count=len(class_map)+1,
-            output_folder_path=output_folder_path,
-            use_amp = use_amp
-            
-        )
+    compute_confution_matrix(
+        data_loader=valid_loader,
+        model = model,
+        class_maps = class_map,
+        draw_plot = True,
+        class_count=len(class_map)+1,
+        output_folder_path=output_folder_path
+    )
     print("Saving Examples")
     draw_examples(
-        model=model,
-        valid_loader=valid_loader,
-        args=args,
-        class_map=class_map,
-        output_folder_path=output_folder_path,
-        mean=mean,std=std,
-        just_binary_trining=just_binary_trining,
-        use_amp = use_amp,
-        binary_type = binary_type
+        model = model,
+        args = args,
+        class_map = class_map,
+        valid_images = valid_images,
+        test_transforms = test_transforms,
+        output_folder_path = output_folder_path,
+        class_count=class_count,
+        device=device
     )
 
     print("Saving Verbal Results")
-    write_verbal_results(recorder,output_folder_path,just_binary_trining)
+    write_verbal_results(recorder,output_folder_path)
 
     print("Copying Notebook To Results")
-    if(args["just_binary_trining"]):
-        if(args["binary_type"]=="common"):
 
-            notebook_name = "commen main.ipynb"
-        elif(args["binary_type"]=="rare"):
-            notebook_name = "rare main.ipynb"
-        else:
-            notebook_name = "nnUnetAttention.ipynb"
-    else:
-        notebook_name = "multi_main.ipynb"
     notebook_out_path = os.path.join(output_folder_path,"notebook.ipynb") 
     shutil.copyfile(f"./{notebook_name}",notebook_out_path )
     print("builfding kaggle project")
-    build_kaggle_project(output_folder_path,notebook_name)
+    build_kaggle_project(output_folder_path,notebook_name=notebook_name)
 
-def write_verbal_results(recorder,output_base_path,just_binary_trining=False):
+def write_verbal_results(recorder,output_base_path):
     report = ""
     report_path = os.path.join(output_base_path,"report.txt")
     losses_keys = recorder.losses_keys
@@ -138,15 +129,15 @@ def write_verbal_results(recorder,output_base_path,just_binary_trining=False):
             report += f"bset {loss_name} : [{best_loss}] - "
             
         report+="\n"
-        if(not just_binary_trining):
-            for index , c in recorder.class_maps.items():
-                dice = recorder.metric_history[part]["dice"][index][best_idx]
-                precision = recorder.metric_history[part]["precision"][index][best_idx]
-                recall = recorder.metric_history[part]["recall"][index][best_idx]
+        for index , c in recorder.class_maps.items():
+            dice = recorder.metric_history[part]["dice"][index][best_idx]
+            precision = recorder.metric_history[part]["precision"][index][best_idx]
+            recall = recorder.metric_history[part]["recall"][index][best_idx]
 
-                counts = train_count[c]
-                report += f"{c} => dice : {dice} - p : {precision} - r : {recall} || train counts : {counts}\n"
+            counts = train_count[c]
+            report += f"{c} => dice : {dice} - p : {precision} - r : {recall} || train counts : {counts}\n"
         report +="<=><=><=><=><=><=><=><=><=><=><=><=><=><=><=><=><=>\n"
+        
     with open(report_path , "w") as f : 
         f.write(report)
 
@@ -229,67 +220,92 @@ def draw_all_metric_plots(recorder,output_folder_path):
 
 
 @torch.no_grad()
-def draw_examples(model,valid_loader,args,class_map,just_binary_trining,
-                  output_folder_path,mean=None,std=None,w=6,h=6,
-                  binary_type=None,use_amp=False):
-    plt_path = os.path.join(output_folder_path,"examples.png")
-    plt.figure(figsize=(30,30))
-    plot_count =18
-    patches = [
-        mpatches.Patch(color=np.array(colors[j-1]) / 255.0, label=f"{j}:{class_map[j]}")
-        for j in range(1,len(class_map)+1)
-    ]
-    i=0
-    img_index=1
-    valid_iterator = iter(valid_loader)
+def draw_examples(model,args,class_map,valid_images,
+                  test_transforms,output_folder_path,
+                  class_count,device,w=6,h=5):
+    image_names = {
+        "easy":[
+            "3","7","12","9","46","66","101","1",
+            "10","35","43","49","70","80","84"
+        ],
+        "normal":[
+            "15","23","47","78","2","17","18","26","30",
+            "39","45","48","60","99","102"
+        ],
+        "hard":[
+            "8","14","24","58","4","16","20","21","32", 
+            "36","63","69","93","107","154"
+        ],
+        "very hard":[
+            "79","132","136","148","161","22","119","44",
+            "129","162","163","182","187","153","95"
+        ]
+    }
+    dataloader_set = make_example_datasets(
+        valid_images=valid_images,
+        image_names=image_names,
+        transform=test_transforms
+    )
     model.eval()
-    for i in range(plot_count):
-        img,masks= next(valid_iterator)
-        with torch.autocast(device_type=args["device"],dtype=torch.float16,enabled=use_amp):
-            pred_masks = model(img.to(args["device"]))[0]
-        
-        chosen_mask = masks[0].squeeze(1)
-        
-        pred_mask = pred_masks[0].cpu().numpy()# 26 x H , W
-        pred_mask = np.argmax(pred_mask,axis=0)# H , W
+    for diff , dalaloader in dataloader_set.items():
+        plt_path = os.path.join(output_folder_path,f"{diff}_examples.png")
+        plt.figure(figsize=(30,30))
+        patches = [
+            mpatches.Patch(color=np.array(colors[j-1]) / 255.0, label=class_map[j])
+            for j in range(1,len(class_map)+1)
+        ]
+        img_index = 1
+        for contexts , targets in tqdm(dalaloader):
+            with torch.autocast(device_type=args["device"],dtype=torch.float16):
+                pred_targets , targets ,b_size , t_max= no_teacher_forcing_pipeline(
+                    model = model,
+                    contexts = contexts,
+                    targets = targets,
+                    class_count = class_count,
+                    device = device
+                )
+            targets = targets.cpu()
+            pred_targets = pred_targets.reshape(-1,class_count,
+                                             targets.shape[2],targets.shape[3])
+            targets = targets.reshape(-1,targets.shape[2],targets.shape[3])
 
-        mask = chosen_mask[0].numpy() # H,W
-        img = img[0]# C , H , W
-
-        if(img.shape[0]==1):
-            img = to_rgb(img)
-        else : 
-            img = denorm(img,mean,std)
-        real_annoted = draw_mask(
-            img,
-            mask,
-            args,
-            colors = colors if not just_binary_trining else None
-        )
-        pred_annoted = draw_mask(
-            img,
-            pred_mask,
-            args,
-            colors = colors if not just_binary_trining else None
-        )
-        
-        gt_classes = labels_to_string(mask)
-        pred_classes = labels_to_string(pred_mask)
-        plt.subplot(h,w,img_index)
-        plt.imshow(real_annoted)
-        plt.title(f"Ground Truth:{gt_classes}")
-        plt.subplot(h,w,img_index+1)
-        plt.imshow(pred_annoted)
-        plt.title(f"Predicted:{pred_classes}")
-        img_index+=2
-        if(img_index-1==h):
-            plt.legend(
-                handles=patches,
-                bbox_to_anchor=(1.05, 1),
-                loc='upper left',
-                borderaxespad=0.,
-                title="Classes"
+            pred_targets , targets = process_targets(
+                pred_targets=pred_targets,
+                targets= targets,
+                b_size=b_size,
+                t_max=t_max,
+                target_shape=(targets.shape[1],targets.shape[2]),
+                class_count=class_count
             )
-        i+=1
-        
-    plt.savefig(plt_path)
+
+            pred_targets = pred_targets.cpu().numpy()
+            pred_targets = np.argmax(pred_targets,axis=1) # B x H x W
+
+            targets = targets.numpy()
+
+            img = contexts[0,1].cpu().numpy() # H x W
+            target = targets[0] # H x W
+            pred_target = pred_targets[0] #H x W
+            
+            x_disp = (img - img.min()) / (img.max() - img.min() + 1e-8)
+            rgb = np.repeat(x_disp[..., None], 3, axis=2)*255
+
+            real_annoted = draw_mask(rgb,target,args,colors)
+            pred_annoted = draw_mask(rgb,pred_target,args,colors)
+            
+            plt.subplot(h,w,img_index)
+            plt.imshow(real_annoted)
+            plt.title(f"Ground Truth ")
+            plt.subplot(h,w,img_index+1)
+            plt.imshow(pred_annoted)
+            plt.title(f"Predicted ")
+            img_index+=2
+            if(img_index-1==w):
+                plt.legend(
+                    handles=patches,
+                    bbox_to_anchor=(1.05, 1),
+                    loc='upper left',
+                    borderaxespad=0.,
+                    title="Classes"
+                )
+        plt.savefig(plt_path)

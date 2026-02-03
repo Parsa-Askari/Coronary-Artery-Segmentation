@@ -64,7 +64,7 @@ def process_notebook(paths,imports_list,codes_list):
         os.remove("./temp_script.py")
     return imports_list , codes_list
 
-def build_kaggle_project(outpath,notebook_name = "nnUnetAttention.ipynb"):
+def build_kaggle_project(outpath,notebook_name = "multi_main.ipynb"):
     imports_list = []
     codes_list = []
     cells = []

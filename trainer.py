@@ -5,170 +5,103 @@ import copy
 import torch.nn.functional as F
 from sklearn.metrics import accuracy_score
 ###IE###
-from utils.helpers import TP_TN_FP_FN
+from utils.helpers import TP_TN_FP_FN , process_targets , no_teacher_forcing_pipeline
 ###SS###
-def send_to_device(array,device):
-    if (isinstance(array,list)):
-        for i in range(len(array)):
-            array[i] = array[i].to(device)
-    else:
-        array = [array.to(device)]
-    return array
-
-def model_sanity_check(model,loss,total_norm):
-    if random.random() <0.01:
-        with torch.no_grad():
-            print("--- Total Norm ---")
-            # with open("./grad_log.txt","a") as f:
-            #     f.write(f"{loss.detach().item()},{total_norm.detach().item()}\n")
-            print(loss,total_norm)
-
-            if(random.random() < 0):
-                print("\n--- Gradient norms ---")
-                for name, param in model.named_parameters():
-                    if param.grad is not None:
-                        grad_norm = param.grad.data.norm().item()
-                        data = torch.norm(param).item()
-                        print(f"{name:30s}: {grad_norm:.6f} - {data:.6f}")
-                        # c+=f"{name:30s}: {grad_norm:.6f} - {data:.6f}\n"
-            # with open("./grad_log.txt","a") as f:
-            #     f.write(c)
-            #     f.write("-----------------\n")
-            print("----------------------\n")
-
-def calculate_loss_loop(preds,ground_truths,loss_weights,loss_fn):
-    loss = 0
-    for i,pred in enumerate(preds):
-        ground_truth = ground_truths[i]
-        loss_weight = loss_weights[i]
-        layer_loss , layer_loss_dict = loss_fn(pred , ground_truth)
-        
-        loss += loss_weight*layer_loss
-        if(i==0):
-            loss_dict = {key:value for key,value in layer_loss_dict.items()}
-        else:
-            loss_dict = {key : loss_dict[key] + (loss_weight*layer_loss_dict[key]) for key in layer_loss_dict}
-    return loss_dict ,loss
-
-def train_fn(model,img,ground_truths,optimizer,loss_fn,scaler,args,device,loss_weights=[1],use_amp=False):
+def train_fn(model,contexts,targets,optimizer,loss_fn,scaler,args):
     optimizer.zero_grad()
     loss_dict={}
+    with torch.autocast(device_type=args["device"],dtype=torch.float16):
+        pred_targets =  model(contexts)
+         
+        loss , loss_dict = loss_fn(pred_targets , targets)
+        
 
-    if(use_amp):
-        with torch.autocast(device_type=args["device"],dtype=torch.float16,enabled=use_amp):
-            preds =  model(img)
-            loss_dict ,loss = calculate_loss_loop(
-                preds=preds,
-                ground_truths=ground_truths,
-                loss_weights=loss_weights,
-                loss_fn=loss_fn
-            )
-                
-        scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
-        
-        model_sanity_check(model,loss,total_norm)
-        
-        scaler.step(optimizer)
-        scaler.update()
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
+
+    if random.random() < 0.001:
+        with torch.no_grad():
+            print("--- Total Norm ---")
+            print(total_norm)
+            # print("\n--- Gradient norms ---")
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         grad_norm = param.grad.data.norm().item()
+            #         print(f"{name:30s}: {grad_norm:.6f}")
+            # print("----------------------\n")
+    scaler.step(optimizer)
+    scaler.update()
     
-    else:
-        with torch.autocast(device_type=args["device"],dtype=torch.float16,enabled=use_amp):
-            preds =  model(img)
-            loss_dict ,loss = calculate_loss_loop(
-                preds=preds,
-                ground_truths=ground_truths,
-                loss_weights=loss_weights,
-                loss_fn=loss_fn
-            )
-
-        loss.backward()
-        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10)
-
-        model_sanity_check(model,loss,total_norm)
-
-        optimizer.step()
-
     loss = loss.detach().cpu().item()
     for loss_name in loss_dict:
         loss_dict[loss_name] = loss_dict[loss_name].detach().cpu().item()
     
     loss_dict["total loss"] = loss
-    pred_mask = preds[0].detach()
-    return loss_dict , pred_mask 
-
-
-
-def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,
-            lr_sch=None,loss_weights=[1],binary_encoder=None,sampler=None):
+    return loss_dict , pred_targets.detach(), targets.detach()
+    
+def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,lr_sch=None,loss_weights=[1]):
     device = args["device"]
     epcohs = args["epcohs"]
     class_count = args["class_count"]
     full_report_cycle = args["full_report_cycle"]
-    use_amp = args["use_amp"]
-    just_binary_trining = args["just_binary_trining"]
-    binary_type = args["binary_type"]
-    scaler = torch.amp.GradScaler(device = device)
+    context_shape = (args["in_c"],)+ args["image_shape"]
+    target_shape = args["image_shape"]
+    scaler = torch.amp.GradScaler(device = device) 
     best_val_dice = float("-inf")
     
     best_model = copy.deepcopy(model)
-    best_ep = 0
     for ep in tqdm(range(epcohs)):
-        if(sampler is not None):
-            sampler.set_epoch(ep)
         total_TP =  torch.zeros(class_count)
         total_FP = torch.zeros(class_count)
         total_FN = torch.zeros(class_count)
-
+        
         model.train()
         class_wise_report = False
-        for img,gt_masks in tqdm(train_loader) : 
+        for contexts , targets  in tqdm(train_loader) : 
             # gt_mask = gt_mask.long()
-            img = img.to(device)
-            gt_masks = send_to_device(gt_masks,device)
-            loss_dict , pred_mask = train_fn(
+            t_max = contexts.shape[1]
+            b_size = contexts.shape[0]
+
+            contexts = contexts.view(-1,*context_shape)
+            targets = targets.view(-1,*target_shape)
+            contexts = contexts.to(device)
+            targets = targets.to(device)
+         
+            loss_dict , pred_targets , targets = train_fn(
                 model = model,
-                img = img,
-                ground_truths = gt_masks,
+                contexts = contexts,
+                targets = targets,
                 optimizer = optimizer,
                 loss_fn = loss_fn,
                 scaler = scaler,
                 args = args,
-                device = device,
-                loss_weights = loss_weights,
-                use_amp = use_amp
+
             )
-            
-            ground_truth_mask = gt_masks[0].squeeze(1)
-            # labels_hist[0]+=[(F.sigmoid(pred_labels.detach().cpu().reshape(-1))>=0.5).tolist()]
-            # labels_hist[1]+=[gt_side_label.cpu().reshape(-1).tolist()]
-            # TP , _ , FP , FN = TP_TN_FP_FN(
-            #     pred_mask,
-            #     gt_mask,
-            #     process_preds=True
-            # )
-            TP , _ , FP , FN = TP_TN_FP_FN(
-                pred_mask,
-                ground_truth_mask,
-                process_preds=True
+            pred_targets , targets = process_targets(
+                pred_targets=pred_targets,
+                targets= targets,
+                b_size=b_size,
+                t_max=t_max,
+                target_shape=target_shape,
+                class_count=class_count
             )
+
+            TP , _ , FP , FN = TP_TN_FP_FN(pred_targets,targets,process_preds=False)
             total_TP += TP
             total_FP += FP
             total_FN += FN
             
             recorder.add_losses("train",loss_dict)
-            
 
+            
         current_lr = [group['lr'] for group in optimizer.param_groups][0]
         print(f"current lr : {current_lr:.4}")
-        # print("train acc",accuracy_score(labels_hist[1],labels_hist[0]))
         if(lr_sch is not None):
             lr_sch.step()
         
 
         dice_score = (2 * total_TP + 1e-8) / (2 * total_TP + total_FP + total_FN + 1e-8)
-
         precision = total_TP /(total_FP + total_TP + 1e-8) 
         recall = total_TP /(total_FN + total_TP + 1e-8) 
         
@@ -193,13 +126,11 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,
             valid_loader=valid_loader,
             class_wise_report=class_wise_report,
             class_count = class_count,
+            context_shape = context_shape,
+            target_shape = target_shape,
             epoch=ep,
-            device=device,
-            use_amp = use_amp,
-            just_binary_trining = just_binary_trining,
-            binary_type=binary_type,
-            loss_weights = loss_weights
-        )
+            device=device)
+        
         if(val_dice>best_val_dice):
             print(f"New Best! : dice = {val_dice}")
             best_model = copy.deepcopy(model)
@@ -207,29 +138,30 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,
             best_ep = ep + 1
     print(f"best result at epoch {best_ep} with dice {best_val_dice}")
     return best_model
+
+
+
 @torch.no_grad()
-def evaluation(recorder,model,loss_fn,valid_loader,class_count,binary_type,
-               class_wise_report=False,epoch=None,device="cuda",
-               use_amp=True,just_binary_trining=False,loss_weights=[1]):
+def evaluation(recorder,model,loss_fn,valid_loader,class_count,context_shape,target_shape,class_wise_report=False,epoch=None,device="cuda"):
     model.eval()
-    total_TP = torch.zeros(class_count)
+    total_TP = total_TP = torch.zeros(class_count)
     total_FP = torch.zeros(class_count)
     total_FN = torch.zeros(class_count)
-
-    labels_hist = [[],[]]
     
-    for img,gt_masks in valid_loader:
-        img = img.to(device)
+    for contexts , targets  in valid_loader:
 
-        with torch.autocast(device_type=device,dtype=torch.float16,enabled=use_amp):
-            preds  = model(img)
-            gt_masks = send_to_device(gt_masks,device)
-            loss_dict ,loss = calculate_loss_loop(
-                preds=preds,
-                ground_truths=gt_masks,
-                loss_weights=loss_weights,
-                loss_fn=loss_fn
+        with torch.autocast(device_type=device,dtype=torch.float16):
+            pred_targets , targets ,b_size , t_max= no_teacher_forcing_pipeline(
+                model = model,
+                contexts = contexts,
+                targets = targets,
+                class_count = class_count,
+                device = device
             )
+
+            pred_targets = pred_targets.reshape(-1,class_count,*target_shape)
+            targets = targets.reshape(-1,*target_shape)
+            loss , loss_dict = loss_fn(pred_targets , targets)
 
             loss = loss.detach().cpu().item()
             for loss_name in loss_dict:
@@ -237,26 +169,21 @@ def evaluation(recorder,model,loss_fn,valid_loader,class_count,binary_type,
         
             loss_dict["total loss"] = loss
         
-        ground_truth_mask = gt_masks[0].squeeze(1)
-        pred_mask = preds[0]
-        # labels_hist[0]+=[(F.sigmoid(pred_labels.detach().cpu().reshape(-1))>=0.5).tolist()]
-        # labels_hist[1]+=[gt_side_label.cpu().reshape(-1).tolist()]
-        
-        # TP , _ , FP , FN = TP_TN_FP_FN(pred_mask,gt_mask,process_preds=True)
-
-        TP , _ , FP , FN  = TP_TN_FP_FN(
-            pred_mask,
-            ground_truth_mask,
-            process_preds=True
+        pred_targets , targets = process_targets(
+            pred_targets=pred_targets,
+            targets= targets,
+            b_size=b_size,
+            t_max=t_max,
+            target_shape=target_shape,
+            class_count=class_count
         )
+        TP , _ , FP , FN = TP_TN_FP_FN(pred_targets,targets,process_preds=False)
         total_TP += TP
         total_FP += FP
         total_FN += FN
         
-
         recorder.add_losses("valid",loss_dict)
-
-    # print("test acc",accuracy_score(labels_hist[1],labels_hist[0]))
+        
     dice_score = (2 * total_TP + 1e-8) / (2 * total_TP + total_FP + total_FN + 1e-8)
     precision = total_TP /(total_FP + total_TP + 1e-8) 
     recall = total_TP /(total_FN + total_TP + 1e-8) 

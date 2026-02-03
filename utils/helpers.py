@@ -16,157 +16,82 @@ from skimage.morphology import skeletonize
 import seaborn as sns
 import json
 ###IE###
-from .dataset import UnetExampleDataset
+from .dataset import UnetExampleDataset , ValidUnetDataset
 ###SS###
-@torch.no_grad()
-def read_images(base_path, part,preprocessor,in_c,resize_binary,
-                max_workers=None,train_class_counts=None,k=40,
-                just_binary_trining=False,resizer=None,rare=None):
+def read_images(base_path, part,preprocessor,max_workers=None,chosen_labels = None):
     base_path = Path(base_path)
     images_base = base_path / "images" / part
     labels_base = base_path / "labels" / part
-    skels_base = base_path / "skels" / part
-    transformed_base = base_path / "transformed" / part
-    
-    with open(f"./data/{part}_side_labels.json","r") as f:
-        side_labels = json.load(f)
-    with open(f"./data/{part}_fg_bboxes.json","r") as f:
-        bboxes = json.load(f)
-    with open(f"./data/{part}.json","r") as f:
-        metadata = json.load(f)
-    if(train_class_counts is not None):
-        freqs = train_class_counts / train_class_counts.sum()
-        class_w = 1 / (freqs + 1e-6)
-        class_w[0] = 0
+
     image_names = sorted([p.name for p in os.scandir(images_base) if p.is_file()])
-    if(train_class_counts is not None):
-        max_count = np.max(train_class_counts[1:])
-        print("max count is : ",max_count)
     if(not preprocessor):
         print("NOTE : preprocessor is not defined . no preprocessing will be used !")
     def _read_one(fname):
         name_stem = Path(fname).stem
         img_path = images_base / fname
         label_path = labels_base / f"{name_stem}.zarr"
-        t_img_path = transformed_base / f"{name_stem}.zarr"
-        skel_path = skels_base / fname
         img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-        # t_img = zarr.load(t_img_path)
         if(preprocessor):
-            for p in preprocessor:
-                img = p(img)
-
-        if(in_c!=1):
-            # img = cv2.cvtColor(img,cv2.COLOR_GRAY2RGB)
-            img = np.stack([img, img, img], axis=-1)
-            # t_img = np.stack([t_img, t_img, t_img], axis=-1)*255
-
+            img = preprocessor(img)
         label = zarr.load(str(label_path))
-        if(train_class_counts is not None):
-            num_classes = class_w.shape[0]
-            counts = np.bincount(label.reshape(-1), minlength=num_classes)
-            weight = float((counts * class_w).sum())
-        else:
-            weight = None
 
-        unique_labels = np.unique(label)
-        unique_labels = unique_labels[unique_labels!=0]
-
-        binary_label = (label!=0).astype(np.uint8)
-        side_label = side_labels[name_stem]
-        bbox = bboxes[name_stem]
-        all_bboxes = metadata[name_stem]["bbox_norm"]
-        all_labels = metadata[name_stem]["labels"]
-        return img, label ,binary_label,bbox, weight , side_label , all_bboxes , all_labels , name_stem
+        return img, label , name_stem
 
     if max_workers is None:
         cpu = os.cpu_count() or 4
         max_workers = min(32, cpu * 4)
 
     results = []
-    weights = []
-    ls=[]
-    co=0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for img, label ,binary_label,bbox, weight , side_label , all_bboxes , all_labels , name_stem  in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
-            if(part=="train" and resizer is not None):
-                current_results , current_weights ,flag=crop_around_rare(
-                    img, 
-                    label ,
-                    binary_label,
-                    bbox, 
-                    weight , 
-                    side_label ,
-                    all_bboxes , 
-                    all_labels,
-                    name_stem,
-                    rare,
-                    resizer
-                )
-                if(flag):
-                    ls.append(name_stem)
-                co+=flag
-            else:
-                current_results = [[[img, label ,binary_label,bbox,name_stem]]]
-                current_weights = [weight]
-            results+=current_results
-            weights+=current_weights
+        for img, label , name_stem in tqdm(ex.map(_read_one, image_names), total=len(image_names)):
+            results.append([img,label,name_stem])
 
-    print("f",co)
+    return results
 
-    if(train_class_counts is not None):
-        weights = torch.tensor(weights).double()
-        weights +=1e-8
-        weights /=weights.sum()
-        return results , weights
-    else:
-        return results
+@torch.no_grad()
+def make_example_datasets(valid_images,image_names,transform):
+    img_dict = {"easy":[],"normal":[],"hard":[],"very hard":[]}
+    for img, label , name_stem in valid_images : 
+        for diff in image_names:
+            if(name_stem in image_names[diff]):
+                img_dict[diff].append([img , label , name_stem])
+                break
+    for diff , images in img_dict.items():
+        ds = ValidUnetDataset(
+            transform = transform,
+            data = images
+        )
+        dl = DataLoader(
+            ds,
+            batch_size=1,
+            num_workers=0,
+            shuffle=False
+        )
+        img_dict[diff] = dl
+
+    return img_dict
+
+@torch.no_grad()
+def no_teacher_forcing_pipeline(model,contexts,targets,class_count,device):
+    """
+    contexts = B x 2 x H x W
+    targets = B x T x H x W
+    """
+    t_max = targets.shape[1]
+    b_size = targets.shape[0]
+    full_target_preds = []
+    contexts = contexts.to(device)
+    for i in range(t_max):
+        pred_target = model(contexts) # B x 26 x H x W
+        full_target_preds.append(pred_target)
+        pred_target = torch.argmax(pred_target,dim=1) # B x H x W
+        contexts[:,0] = pred_target
+
+    full_target_preds = torch.stack(full_target_preds,dim=0) # T x B x 26 x H x W
+
+    full_target_preds = full_target_preds.permute(1,0,2,3,4) # B x T x 26 x H x W
     
-def crop_around_rare(img, label ,binary_label,bbox, weight , side_label ,all_bboxes , all_labels,name_stem,rare_labels,resizer):
-    current_results = [[img, label ,binary_label,bbox,name_stem]]
-    current_weights = [weight]
-    flag=0
-    for i,l in enumerate(all_labels):
-        if l in rare_labels:
-            rx_up = all_bboxes[i][0]
-            ry_up = all_bboxes[i][1]
-            rx_down = rx_up + all_bboxes[i][2]
-            ry_down = ry_up + all_bboxes[i][3]
-
-            tx_up = bbox[0]
-            ty_up = bbox[1]
-            tx_down = bbox[2]
-            ty_down = bbox[3]
-
-            x_up_margin = (rx_up - tx_up)//2
-            y_up_margin = (ry_up - ty_up)//2
-            x_down_margin = (tx_down - rx_down)//2
-            y_down_margin = (ty_down - ry_down)//2
-
-            rx_up = int(max(0,rx_up - x_up_margin))
-            ry_up = int(max(0,ry_up - y_up_margin))
-            rx_down = int(min(tx_down,rx_down + x_down_margin))
-            ry_down = int(min(ty_down,ry_down + y_down_margin))
-    
-            # res = resizer(
-            #     image=img[ry_up:ry_down,rx_up:rx_down,None],
-            #     mask=label[ry_up:ry_down,rx_up:rx_down,None],
-            #     binary_mask = binary_label[ry_up:ry_down,rx_up:rx_down,None]
-            # )
-            new_img = np.zeros_like(img)
-            new_binary_label = np.zeros_like(binary_label)
-            new_label = np.zeros_like(label)
-            
-            new_img[ry_up:ry_down,rx_up:rx_down] = img[ry_up:ry_down,rx_up:rx_down]
-            new_binary_label[ry_up:ry_down,rx_up:rx_down]=binary_label[ry_up:ry_down,rx_up:rx_down]
-            new_label[ry_up:ry_down,rx_up:rx_down]=label[ry_up:ry_down,rx_up:rx_down]
-
-            
-            current_results += [[new_img.copy(), new_label.copy() ,new_binary_label.copy(),[0,0,511,511],name_stem]]
-            current_weights += [weight]
-            flag=1
-    
-    return [current_results],current_weights,flag
+    return full_target_preds, targets.to(device) , b_size , t_max
 
 def to_device(img,gt_mask,device,binary_mode):
     gt_mask = gt_mask.long()
@@ -186,7 +111,6 @@ def crop_dims(target , current):
     down = (current.shape[2]-target.shape[2]) - top
     croped = current[:,:,top:-down , left:-right]
     return croped
-
 def padd_dims(target , current):
     pad_h = target.shape[2] - current.shape[2] 
     pad_w = target.shape[3] - current.shape[3]
@@ -194,14 +118,30 @@ def padd_dims(target , current):
     return padded
 
 @torch.no_grad()
-def TP_TN_FP_FN(preds,gt,process_preds=True,return_TN=False):
+def process_targets(pred_targets , targets , b_size , t_max , target_shape , class_count):
+    """
+    pred_targets = B x T , 26 , H , W
+    targets = B x T , H , W 
+    """
+    pred_targets = torch.argmax(pred_targets,dim=1) # BxT , H, W
+    pred_targets = pred_targets.view(b_size,t_max,*target_shape) # B , T , H, W
+    pred_targets = pred_targets.max(dim=1).values # B , H, W
+    pred_targets = F.one_hot(pred_targets, num_classes=class_count) # B , H , W , 26
+    pred_targets = pred_targets.permute(0, 3, 1, 2).float()  # B , 26 , H , W 
+
+    targets = targets.view(b_size,t_max,*target_shape) # B , T , H, W
+    targets = targets.max(dim=1).values # B , H , W
+
+    return pred_targets , targets
+@torch.no_grad()
+def TP_TN_FP_FN(preds,gt,process_preds=False,return_TN=False):
     if(process_preds):
         preds_argmax = torch.argmax(preds,dim=1)
         onehot_preds = F.one_hot(preds_argmax,num_classes=preds.shape[1])
         pred_onehot = onehot_preds.permute(0, 3, 1, 2).float()
     else :
         pred_onehot = preds
-    
+        
     onehot_gt = F.one_hot(gt,num_classes=preds.shape[1])
     onehot_gt = onehot_gt.permute(0, 3, 1, 2).float()
     TN = 0
@@ -213,43 +153,16 @@ def TP_TN_FP_FN(preds,gt,process_preds=True,return_TN=False):
     FN = ((onehot_gt*(1-pred_onehot)).sum(dim=(0,2,3))).cpu()
     return TP , TN , FP , FN
 
-def to_rgb(img):
-    if(isinstance(img,np.ndarray)):
-        img = torch.from_numpy(img)
-    x_disp = (img- img.min()) / (img.max() - img.min() + 1e-8)
-    
-    img = torch.cat([x_disp,x_disp,x_disp],dim=0) *255
-    # print("d",img.shape)
-    img = img.permute(1,2,0)
-    return img.numpy()
-def denorm(img,mean,std):
-    if(isinstance(img,np.ndarray)):
-        img = torch.from_numpy(img)
-    img = (img*std) + mean
-    img = img.clamp(0,1)*255
-    return img.permute(1,2,0).cpu().numpy().astype(np.uint8)
-
 def draw_mask(image,mask,args=None,colors=None):
     img = image.copy().astype(np.uint8)
     m = mask.astype(np.int64)
     if(colors is None):
         colors = np.array([(0,255,0)]*25,dtype=np.uint8)
-        c = np.array([(0,255,0)])
-        
-    else:
-        
-        c = colors[m[m>0]-1].reshape(-1,3)
-        
-    # print("----")
-    # print(c.shape)
-    # print(img[m>0].shape)
-    img[m>0] = c
-    # print(img.shape)
+    img[m>0] = colors[m[m>0]-1]
     return img
 
 @torch.no_grad()
-def plot_some_images(data,transforms,mean,std,image_counts=36,fig_shape=(6,6),
-                     base_transforms=None):
+def plot_some_images(data,transforms,image_counts=36,fig_shape=(6,6),base_transforms=None):
     ds = UnetExampleDataset(transform=transforms , data=data,base_transform=base_transforms)
     dataloader = DataLoader(
         ds,
@@ -264,25 +177,18 @@ def plot_some_images(data,transforms,mean,std,image_counts=36,fig_shape=(6,6),
     plt.figure(figsize=(w*5,h*5))
     for i in range(1,image_counts+1,2):
         new_imgs , new_mask , old_imgs , old_mask = next(iter_loader)
-   
-        new_img = new_imgs[0]
-        old_img = old_imgs[0]
+        new_img = new_imgs[0].numpy()
+        old_img = old_imgs[0].numpy()
         if(new_img.shape[0]==1):
-            new_img = to_rgb(new_img)
-            old_img = to_rgb(old_img)
+            new_img = new_img[0]
+            old_img = old_img[0]
 
-        else:
-            new_img = denorm(new_img,mean,std)
-            old_img = denorm(old_img,mean,std)
-
-        # print(old_img.min(),old_img.max())
-        # print(new_img.min(),new_img.max())
-        # print("--------------")
+        x_disp = (new_img- new_img.min()) / (new_img.max() - new_img.min() + 1e-8)
+        new_img = np.repeat(x_disp[..., None], 3, axis=2)*255
         new_img = draw_mask(new_img,new_mask[0].numpy())
-        
-        # print(old_img.min(),old_img.max())
+
         plt.subplot(w,h,i)
-        plt.imshow(old_img)
+        plt.imshow(old_img,cmap="gray")
         plt.title("Old Image")
 
         plt.subplot(w,h,i+1)
@@ -343,18 +249,36 @@ def pre_soft_skeletonize(base_path,output_path,batch_size=10,k=25):
                 name_buffer = []
 
 @torch.no_grad()
-def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=None,draw_plot = True,class_count=26,use_amp=False):
+def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=None,draw_plot = True,class_count=26):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     conf_mat = torch.zeros((class_count,class_count))
     model.eval()
-    for img, masks in data_loader:
-        img = img.to(device)
-        with torch.autocast(device_type=device,dtype=torch.float16,enabled=use_amp):
-            mask = masks[0].to(device).view(-1)
-            pred_masks = model(img)[0]
-
-        pred_mask = torch.argmax(pred_masks,dim=1).view(-1)
-        encoded_results = (mask*class_count + pred_mask).cpu()
+    for contexts , targets in tqdm(data_loader):
+        with torch.autocast(device_type=device,dtype=torch.float16):
+            pred_targets , targets ,b_size , t_max= no_teacher_forcing_pipeline(
+                model = model,
+                contexts = contexts,
+                targets = targets,
+                class_count = class_count,
+                device = device
+            )
+            # pred_targets : B x T x 26 x H x W
+            # targets : B x T x H x W
+        pred_targets = pred_targets.reshape(-1,class_count,targets.shape[2],targets.shape[3])
+        targets = targets.reshape(-1,targets.shape[2],targets.shape[3])
+        pred_targets , targets = process_targets(
+            pred_targets=pred_targets,
+            targets= targets,
+            b_size=b_size,
+            t_max=t_max,
+            target_shape=(targets.shape[1],targets.shape[2]),
+            class_count=class_count
+        )
+        # pred_targets = B , 26 , H , W 
+        # targets : B x H x W
+        targets = targets.reshape(-1)
+        pred_targets = torch.argmax(pred_targets,dim=1).view(-1) # B x H x W
+        encoded_results = (targets*class_count + pred_targets).cpu() # # B x H x W
         counts = torch.bincount(encoded_results,minlength=class_count**2).view(class_count,class_count)
         conf_mat += counts
         
@@ -398,124 +322,3 @@ def soft_skeletonize(I,k=25):
         I_ = soft_open(I)
         S = S + (1-S)*F.relu(I-I_)
     return S
-def labels_to_string(mask,remove_bg = True,max_size =13):
-    s = 0
-    if(remove_bg):
-        s=1
-    u = np.unique(mask)[1:].tolist()
-    u = list(map(str,u))
-    c = ""
-    for i,label in enumerate(u) : 
-        c+=label
-        if((i+1)%max_size==0):
-            c+="\n"
-        else:
-            c+="|"
-    return c
-
-def make_fg_bboxes(parts,base_path,space=10):
-    for part in parts:
-        print(f"processing {part}")
-        main_path = os.path.join(base_path,f"{part}.json")
-        out_path = os.path.join(base_path,f"{part}_fg_bboxes.json")
-        ls={}
-
-        with open(main_path , "r") as f:
-            train_json = json.load(f)
-        for path , data in tqdm(train_json.items()):
-            name = Path(path).stem
-            bbox_norm = data["bbox_norm"]
-            x_min = float("inf")
-            y_min = float("inf")
-            x_max = 0
-            y_max = 0
-            for bbox in bbox_norm:
-                x1,y1 = bbox[0:2]
-                x2 = x1 + bbox[2]
-                y2 = y1 + bbox[3]
-                x_min = min(x_min,x1)
-                y_min = min(y_min,y1)
-                x_max = max(x_max,x2)
-                y_max = max(y_max,y2)
-
-            x_min = int(max(0,x_min-space))
-            y_min = int(max(0,y_min-space))
-            x_max = int(min(511,x_max+space))
-            y_max = int(min(511,y_max+space))
-
-            ls[name] = [x_min,y_min,x_max,y_max]
-        with open(out_path,"w") as f:
-            json.dump(ls,f)
-# make_fg_bboxes(base_path="../data/",parts=["train","val","test"],space=25)
-def bbox_infoes(parts , base_path):
-    for part in parts:
-        print(f"for {part}")
-        path = os.path.join(base_path , f"{part}_fg_bboxes.json")
-        with open( path, "r") as f : 
-            data = json.load(f)
-        bboxes = [[],[],[],[]]
-        for key , bbox in data.items():
-            bboxes[0] += [bbox[0]]
-            bboxes[1] += [bbox[1]]
-            bboxes[2] += [bbox[2]]
-            bboxes[3] += [bbox[3]]
-
-        mean_xmin , med_xmin  = np.mean(bboxes[0]) , np.median(bboxes[0])
-        mean_ymin , med_ymin = np.mean(bboxes[1]) , np.median(bboxes[1])
-        mean_xmax , med_xmax = np.mean(bboxes[2]) , np.median(bboxes[2])
-        mean_ymax , med_ymax = np.mean(bboxes[3]) , np.median(bboxes[3])
-
-        max_xmin , min_xmin  = np.max(bboxes[0]) , np.min(bboxes[0])
-        max_ymin , min_ymin = np.max(bboxes[1]) , np.min(bboxes[1])
-        max_xmax , min_xmax = np.max(bboxes[2]) , np.min(bboxes[2])
-        max_ymax , min_ymax = np.max(bboxes[3]) , np.min(bboxes[3])
-
-
-        print(f"mean = {mean_xmin} , {mean_ymin} , {mean_xmax} , {mean_ymax}")
-        print(f"median = {med_xmin} , {med_ymin} , {med_xmax} , {med_ymax}")
-        print(f"min = {min_xmin} , {min_ymin} , {min_xmax} , {min_ymax}")
-        print(f"max = {max_xmin} , {max_ymin} , {max_xmax} , {max_ymax}")
-        print("-"*100)
-# bbox_infoes(parts=["train","val","test"],base_path="../data/")
-
-def class_weighting(method,class_counts,**kwargs):
-    if(kwargs["use_pixel_counts"]):
-        print("using pixel counts")
-        with open("./data/train_pixel_counts.json","r") as f:
-            train_class_counts = json.load(f)
-        counts = [0]*(len(train_class_counts))
-        for k,v in train_class_counts.items():
-            counts[int(k)] = int(v)
-        counts = np.array(counts,dtype=np.float64)
-    else :
-        print("using class counts")
-        counts = np.array(class_counts,dtype=np.float64)
-
-    if(method=="median"):
-        print("median weights being used")
-        median_count = np.median(counts)
-        weights = median_count/np.array(counts)
-        
-    elif(method=="log"):
-        print("log weights being used")
-        total = np.sum(counts)
-        weights = np.log(total/np.array(counts))
-        weights = (weights / weights.mean())
-        weights[0]=0.1
-    elif(method=="beta"):
-        print("beta weights being used")
-        b = kwargs["b"]
-        weights = (1-b)/(1-np.power(b,counts))
-        weights = weights / weights.sum()
-        weights[12] = 0.25
-    else:
-        print("no class weights being used")
-        return None
-    return weights.tolist()
-
-@torch.no_grad()
-def freeze_binary_encoder(binary_encoder):
-    
-    for param in binary_encoder.parameters():
-        param.requires_grad = False
-    return binary_encoder

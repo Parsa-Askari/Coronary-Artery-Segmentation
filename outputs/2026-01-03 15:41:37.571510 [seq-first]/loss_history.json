@@ -1,0 +1,24 @@
+{
+    "train": {
+        "total loss": [
+            []
+        ],
+        "CE loss": [
+            []
+        ],
+        "tversky loss": [
+            []
+        ]
+    },
+    "valid": {
+        "total loss": [
+            []
+        ],
+        "CE loss": [
+            []
+        ],
+        "tversky loss": [
+            []
+        ]
+    }
+}

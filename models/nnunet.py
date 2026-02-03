@@ -8,7 +8,6 @@ class nnUnet(nn.Module):
     def __init__(self,args,encoder_channel_settings=None,decoder_channel_settings=None):
         super(nnUnet,self).__init__()
         
-        in_c = args["in_c"]
         class_count = args["class_count"]
         attention = args["attention"]
         image_shape = args["image_shape"]
@@ -17,21 +16,17 @@ class nnUnet(nn.Module):
         max_channels = args["max_channels"]
         input_channels = args["in_c"]
         self.deep_super_vision = args["deep_super_vision"]
-        unet_depth = args["unet_depth"]
-        dsv_bottleneck = args["dsv_bottleneck"]
+        co = args["layer_count"]
         h = image_shape[0]
         w = image_shape[1]
         
-        co=0
-        if(not unet_depth):
-            while(w>4 and h>4):
-                w/=2
-                h/=2
-                co+=1
-            
-        else:
-            co = unet_depth
+        
+        for i in range(co):
+            w/=2
+            h/=2
+        
         print(f"number of layers : {co}")
+
         # create encoder settings 
         if(encoder_channel_settings is None):
             self.encoder_channel_settings = [base_channel]
@@ -75,7 +70,7 @@ class nnUnet(nn.Module):
                     gate_c = input_channels , 
                     attention = attention,
                     f_int_scale=f_int_scale,
-                    dsv = self.deep_super_vision if i!=0 else dsv_bottleneck,
+                    dsv = self.deep_super_vision,
                     class_count=class_count
                 )] + self.decoders
             
@@ -108,67 +103,53 @@ class nnUnet(nn.Module):
             x = out
         x_in,gate_in = self.bottle_neck(x)
         
-        outputs = []
         # print(len(self.decoders))
         for i in range(len(self.decoders) - 1, -1, -1):
             # print("2")
             decoder = self.decoders[i]
             skip = skips[i+1]
             x_out,gate_out,dsv_out = decoder(x_in,skip,gate_in)
-            
-            if(dsv_out!=None):
-                outputs = [dsv_out] + outputs
+
             x_in=x_out
             gate_in=gate_out
         # print(x_in.shape)
-        outputs = [self.head(
+        output = self.head(
             x_in = x_in,
             x_skip = skips[0],
             x_gate = gate_in
-        )] + outputs
-        return outputs
+        )
+        return output
 if __name__ == "__main__":
     args = {
-    "base_path" : "./dataset/syntax",
-    "in_c" : 3,
-    "base_channel" :32,
-    "image_shape" : (448,448),
-    "abs_class_count":17,
-    "attention" : True,
-    "k":40,
-    "batch_size" : 7,
-    "num_workers" : 5,
-    "device" : "cuda" if torch.cuda.is_available() else "cpu",
-    "lr" : 0.0005,
-    "momentum" : 0.99,
-    "crop_prob": 0,
-    "weight_decay" : 0.001,
-    "epcohs":30,
-    "f_int_scale" : 2,
-    "full_report_cycle" : 10,
-    "max_channels":512,
-    "unet_depth":6,
-    "loss_type":"tversky loss",
-    "alpha":0.7,
-    "beta":0.3,
-    "t_gamma":2.0,
-    "f_gamma":2.0,
-    "resize_binary":[True,(224,224)],
-    "loss_coefs":{"CE":1.0,"Second":1.0},
-    "swin_head" : "costume",
-    "swin_type":"swin_v2_s",
-    "output_base_path" : "./outputs",
-    "name" : "both-amp32-b3a7-no_crop-dsv",
-    "deep_super_vision" : True,
-    "just_binary_trining":True,
-    "use_sch":True,
-    "use_amp":False,
-    "f_alpha":None,
-    "remove_bg":True,
-    "binary_type":"both",
-
-
-}
+        "base_path" : "../arcade/nnUnet_dataset/syntax",
+        "in_c" : 1,
+        "base_channel" :32,
+        "image_shape" : (448,448),
+        "class_count" : 26 ,
+        "attention" : True,
+        "k":40,
+        "batch_size" : 10,
+        "num_workers" : 10,
+        "device" : "cuda" if torch.cuda.is_available() else "cpu",
+        "lr" : 0.01,
+        "momentum" : 0.99,
+        "weight_decay" : 3e-5,
+        "epcohs":30,
+        "f_int_scale" : 2,
+        "full_report_cycle" : 10,
+        "max_channels":512,
+        "input_channels":1,
+        "loss_type":"dice loss",
+        "alpha":0.75,
+        "beta":0.25,
+        "gamma":1.00,
+        "f_gamma":2.0,
+        "f_loss_scale":1,
+        "loss_coefs":{"CE":1.0,"Second":1.0},
+        "output_base_path" : "./outputs",
+        "name" : "Attention7-AllClass",
+        "deep_super_vision" : True
+    }
     class_map = {
         1: '1',2: '2', 3: '3',4: '4',
         5: '5',6: '6',7: '7',8: '8',
@@ -179,11 +160,11 @@ if __name__ == "__main__":
         24: '12b',25: '14b'
     }
     model = nnUnet(args).to("cuda")
-    ls = torch.ones((10,3,args["image_shape"][0],args["image_shape"][1])).float().to("cuda")
+    ls = torch.ones((10,1,448,448)).float().to("cuda")
     outs = model(ls)
     for out in outs:
         print(out.shape)
- 
+
     # """
     # torch.Size([10, 32, 256, 256])
     # torch.Size([10, 64, 128, 128])
