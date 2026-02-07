@@ -16,7 +16,7 @@ from skimage.morphology import skeletonize
 import seaborn as sns
 import json
 ###IE###
-from .dataset import UnetExampleDataset , ValidUnetDataset
+from .dataset import UnetExampleDataset , TrainUnetDataset , collate_fn_train
 ###SS###
 def read_images(base_path, part,preprocessor,max_workers=None,chosen_labels = None):
     base_path = Path(base_path)
@@ -30,7 +30,7 @@ def read_images(base_path, part,preprocessor,max_workers=None,chosen_labels = No
         name_stem = Path(fname).stem
         img_path = images_base / fname
         label_path = labels_base / f"{name_stem}.zarr"
-        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+        img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
         if(preprocessor):
             img = preprocessor(img)
         label = zarr.load(str(label_path))
@@ -57,7 +57,7 @@ def make_example_datasets(valid_images,image_names,transform):
                 img_dict[diff].append([img , label , name_stem])
                 break
     for diff , images in img_dict.items():
-        ds = ValidUnetDataset(
+        ds = TrainUnetDataset(
             transform = transform,
             data = images
         )
@@ -65,7 +65,8 @@ def make_example_datasets(valid_images,image_names,transform):
             ds,
             batch_size=1,
             num_workers=0,
-            shuffle=False
+            shuffle=False,
+            collate_fn=collate_fn_train
         )
         img_dict[diff] = dl
 
@@ -118,21 +119,25 @@ def padd_dims(target , current):
     return padded
 
 @torch.no_grad()
-def process_targets(pred_targets , targets , b_size , t_max , target_shape , class_count):
+def process_masks(pred_targets , b_size , t_max , target_shape , class_count):
     """
-    pred_targets = B x T , 26 , H , W
-    targets = B x T , H , W 
+    inputs : pred_targets , targets
+        - pred_targets = B x T , class_counts , H , W
+        - targets = B x T , H , W 
+    outputs : pred_targets , targets
+        - pred_targets = B , class_count , H , W 
+        - targets = B , H , W
     """
-    pred_targets = torch.argmax(pred_targets,dim=1) # BxT , H, W
-    pred_targets = pred_targets.view(b_size,t_max,*target_shape) # B , T , H, W
-    pred_targets = pred_targets.max(dim=1).values # B , H, W
-    pred_targets = F.one_hot(pred_targets, num_classes=class_count) # B , H , W , 26
-    pred_targets = pred_targets.permute(0, 3, 1, 2).float()  # B , 26 , H , W 
+    pred_targets = pred_targets.view(b_size,t_max,class_count,*target_shape) # B,T,class_count,H,W
+    pred_targets = torch.logsumexp(pred_targets, dim=1) # B,class_count,H,W
+    pred_targets = pred_targets.argmax(dim=1) # B,H,W
+    pred_targets = F.one_hot(pred_targets, num_classes=class_count) # B , H , W , class_count
+    pred_targets = pred_targets.permute(0, 3, 1, 2).float()  # B , class_count , H , W 
 
-    targets = targets.view(b_size,t_max,*target_shape) # B , T , H, W
-    targets = targets.max(dim=1).values # B , H , W
+    # targets = targets.view(b_size,t_max,*target_shape) # B , T , H, W
+    # targets = targets.max(dim=1).values # B , H , W
 
-    return pred_targets , targets
+    return pred_targets #, targets
 @torch.no_grad()
 def TP_TN_FP_FN(preds,gt,process_preds=False,return_TN=False):
     if(process_preds):
@@ -147,8 +152,8 @@ def TP_TN_FP_FN(preds,gt,process_preds=False,return_TN=False):
     TN = 0
     if(return_TN):
         TN = (((1-onehot_gt)*(1-pred_onehot)).sum(dim=(0,2,3))).cpu()
+
     TP = ((onehot_gt*pred_onehot).sum(dim=(0,2,3))).cpu()
-    
     FP = (((1-onehot_gt)*pred_onehot).sum(dim=(0,2,3))).cpu()
     FN = ((onehot_gt*(1-pred_onehot)).sum(dim=(0,2,3))).cpu()
     return TP , TN , FP , FN
@@ -253,32 +258,32 @@ def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=Non
     device = "cuda" if torch.cuda.is_available() else "cpu"
     conf_mat = torch.zeros((class_count,class_count))
     model.eval()
-    for contexts , targets in tqdm(data_loader):
+    for imgs , masks , stop_labels , full_masks in tqdm(data_loader):
+        seq_len = masks.shape[1]
+        b_size = imgs.shape[0]
+        masks = masks.reshape(-1,masks.shape[2],masks.shape[3])
+            
+        imgs = imgs.to(device)
+        masks = masks.to(device)
+        stop_labels = stop_labels.to(device)
         with torch.autocast(device_type=device,dtype=torch.float16):
-            pred_targets , targets ,b_size , t_max= no_teacher_forcing_pipeline(
-                model = model,
-                contexts = contexts,
-                targets = targets,
-                class_count = class_count,
-                device = device
-            )
-            # pred_targets : B x T x 26 x H x W
-            # targets : B x T x H x W
-        pred_targets = pred_targets.reshape(-1,class_count,targets.shape[2],targets.shape[3])
-        targets = targets.reshape(-1,targets.shape[2],targets.shape[3])
-        pred_targets , targets = process_targets(
-            pred_targets=pred_targets,
-            targets= targets,
+            pred_stop_labels,pred_masks =  model(imgs,seq_len)
+            # pred_targets : B * T x 26 x H x W
+            # targets : B * T x H x W
+        masks = masks.cpu()
+        full_masks = full_masks.to(device)
+        pred_targets  = process_masks(
+            pred_targets=pred_masks,
             b_size=b_size,
-            t_max=t_max,
-            target_shape=(targets.shape[1],targets.shape[2]),
+            t_max=seq_len,
+            target_shape=(masks.shape[1],masks.shape[2]),
             class_count=class_count
         )
         # pred_targets = B , 26 , H , W 
         # targets : B x H x W
-        targets = targets.reshape(-1)
+        full_masks = full_masks.reshape(-1)
         pred_targets = torch.argmax(pred_targets,dim=1).view(-1) # B x H x W
-        encoded_results = (targets*class_count + pred_targets).cpu() # # B x H x W
+        encoded_results = (full_masks*class_count + pred_targets).cpu() # # B x H x W
         counts = torch.bincount(encoded_results,minlength=class_count**2).view(class_count,class_count)
         conf_mat += counts
         
@@ -305,6 +310,13 @@ def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=Non
             out_path = os.path.join(output_folder_path,"conf_mat.png")
             plt.savefig(out_path)
     return conf_mat
+def denormalize(img_norm):
+    IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+    IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    img = img_norm * IMAGENET_STD + IMAGENET_MEAN
+    img = np.clip(img, 0.0, 1.0)
+    img_u8 = (img * 255).astype(np.uint8)
+    return img_u8
 
 def erode(mask):
     h_pool = -F.max_pool2d(-mask,(3,1),(1,1),(1,0))

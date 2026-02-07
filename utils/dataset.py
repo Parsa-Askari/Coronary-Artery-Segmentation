@@ -12,48 +12,44 @@ from torch.utils.data import Sampler
 ###IE###
 ###SS###
 def collate_fn_train(batch):
+    """
+    batch : list of batches [img , targets , stops] 
+        -   img : (C,H,W)
+        -   targets : (unique_len,H,W)
+        -   stops : (unique_len)
+        -   full_masks : (H,W)
+    """
     lengths = [x[2].shape[0] for x in batch]
     max_t = max(lengths)
     batch_size = len(batch)
     
-    _, H, W = batch[0][0].shape 
+    H, W, C = batch[0][0].shape 
     
-    batch_inputs = torch.zeros((batch_size, max_t, 2, H, W), dtype=torch.float32)
+    batch_imgs = torch.zeros((batch_size,C,H, W), dtype=torch.float32)
     batch_targets = torch.zeros((batch_size, max_t, H, W), dtype=torch.long)
+    batch_stops = torch.zeros((batch_size, max_t), dtype=torch.long)
+    batch_full_masks = torch.zeros((batch_size, H, W), dtype=torch.long)
 
-    for i, (img, ctx, tgt) in enumerate(batch):
+    for i, (img, target, stop_label , full_mask) in enumerate(batch):
         t = lengths[i]
         
-        img_t = torch.from_numpy(img)
-        ctx_t = torch.from_numpy(ctx)
-        tgt_t = torch.from_numpy(tgt)
-
-        batch_inputs[i, :t, 0] = ctx_t
-        batch_inputs[i, :t, 1] = img_t 
-        batch_targets[i, :t] = tgt_t
+        img_t = torch.from_numpy(img).permute(2,0,1)
+        target_t = torch.from_numpy(target)
+        stop_label_t = torch.from_numpy(stop_label)
+        full_mask_t = torch.from_numpy(full_mask)
         
-        if t < max_t:
-            batch_inputs[i, t:, 0] = ctx_t[-1]
-            batch_inputs[i, t:, 1] = img_t
+        batch_imgs[i] = img_t
+        batch_targets[i, :t] = target_t 
+        batch_stops[i, :t] = stop_label_t
+        batch_full_masks[i] = full_mask_t
 
-    return batch_inputs, batch_targets
-    
-def collate_fn_test(batch):
-    lengths = [x[1].shape[0] for x in batch]
-    max_t = max(lengths)
-    batch_size = len(batch)
-    
-    _, H, W = batch[0][0].shape 
-    
-    batch_targets = torch.zeros((batch_size, max_t, H, W), dtype=torch.long)
-    batch_inputs = torch.zeros((batch_size, 2, H, W), dtype=torch.float32)
-    for i, (ctx, tgt) in enumerate(batch):
-        t = lengths[i]
-        tgt_t = torch.from_numpy(tgt)
-        batch_targets[i, :t] = tgt_t
-        batch_inputs[i] = ctx
-
-    return batch_inputs, batch_targets
+    """
+    batch_imgs : (B,C,H,W)
+    batch_targets : (B,seq_len,H,W)
+    batch_size : (B,seq_len)
+    batch_full_masks : (B,H,W)
+    """
+    return batch_imgs, batch_targets, batch_stops, batch_full_masks
 
 class TrainUnetDataset(Dataset):
     def __init__(self, transform, data):
@@ -65,6 +61,10 @@ class TrainUnetDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, index):
+        """
+        img : (H,W,C)
+        maks : (H,W)
+        """
         img, mask,_ = self.data[index]
         
         if img.ndim == 2: img = img[..., None]
@@ -77,66 +77,26 @@ class TrainUnetDataset(Dataset):
         if torch.is_tensor(new_image): new_image = new_image.numpy()
         if torch.is_tensor(new_mask): new_mask = new_mask.numpy()
         
+        # turn image shape to : (C,H,W)
         if new_image.ndim == 3 and new_image.shape[-1] == 1: 
-            new_image = new_image.transpose(2, 0, 1)
+            new_image = new_image.transpose(2, 0, 1) 
         elif new_image.ndim == 2:
-            new_image = new_image[None, :, :]
-            
+            new_image = new_image[None, :, :] 
+        # mask shape to : (H,W)
         if new_mask.ndim == 3: new_mask = new_mask.squeeze(-1)
 
         u = np.unique(new_mask)
         labels = u[1:] if u[0] == 0 else u
+        # targets : (unique_len,H,W)
         targets = (new_mask[None, :, :] == labels[:, None, None]).astype(np.float32) * labels[:, None, None]
+        # NOTE : we add an stop token here also with the shape (1,H,W) full zero
+        stop_token = np.zeros((1,new_mask.shape[0],new_mask.shape[1]),dtype=np.float32)
+        targets = np.concatenate([targets,stop_token],axis=0)
+        # stop labels = (unique_len+1)
+        stop_labels = np.ones(len(labels)+1)
+        stop_labels[-1] = 0
+        return new_image, targets, stop_labels ,new_mask
 
-        accumulated = np.cumsum(targets, axis=0)
-        zeros = np.zeros((1, new_mask.shape[0], new_mask.shape[1]), dtype=np.float32)
-
-        if len(labels) > 1:
-            contexts = np.concatenate([zeros, accumulated[:-1]], axis=0)
-        else:
-            contexts = zeros
-
-        return new_image, contexts, targets
-
-class ValidUnetDataset(Dataset):
-    def __init__(self, transform, data):
-        super(ValidUnetDataset, self).__init__()
-        self.data = data
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, index):
-        img, mask,_ = self.data[index]
-        
-        if img.ndim == 2: img = img[..., None]
-        if mask.ndim == 2: mask = mask[..., None]
-
-        result = self.transform(image=img, mask=mask)
-        new_image = result['image']
-        new_mask = result['mask']
-
-        if torch.is_tensor(new_image): new_image = new_image.numpy()
-        if torch.is_tensor(new_mask): new_mask = new_mask.numpy()
-        
-        if new_image.ndim == 3 and new_image.shape[-1] == 1: 
-            new_image = new_image.transpose(2, 0, 1)
-        elif new_image.ndim == 2:
-            new_image = new_image[None, :, :]
-            
-        if new_mask.ndim == 3: new_mask = new_mask.squeeze(-1)
-
-        u = np.unique(new_mask)
-        labels = u[1:] if u[0] == 0 else u
-
-        targets = (new_mask[None, :, :] == labels[:, None, None]).astype(np.float32) * labels[:, None, None]
-
-
-        contexts = np.zeros((1, new_mask.shape[0], new_mask.shape[1]), dtype=np.float32)
-        contexts = np.concatenate([contexts,new_image],axis=0)
-        contexts = torch.from_numpy(contexts)
-        return contexts , targets
 
 class UnetExampleDataset(Dataset):
     def __init__(self,transform,data,base_transform=None):

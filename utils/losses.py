@@ -14,22 +14,27 @@ class UnetLoss(nn.Module):
         self.alpha = args["alpha"]
         self.beta = args["beta"]
         self.t_gamma = args["t_gamma"]
-        self.f_gamma = args["f_gamma"]
+        self.mask_ce_weights = args["mask_ce_weights"]
         self.k = args["k"]
         # self.focal_fn = FocalCrossEntropy(
         #     f_gamma=self.f_gamma,
         #     eps=eps,
-        #     f_alpha=args["f_alpha"],
+        #     mask_ce_weights=args["mask_ce_weights"],
         #     f_loss_scale = args["f_loss_scale"]
         # )
-        if(args["f_alpha"] is not None):
-            w = torch.tensor(args["f_alpha"],dtype=torch.float32,device="cuda")
+        self.stop_ce = nn.BCEWithLogitsLoss()
+        if(args["mask_ce_weights"] is not None):
+            w = torch.tensor(
+                args["mask_ce_weights"],
+                dtype=torch.float32,
+                device="cuda"
+            )
             self.ce_fn = nn.CrossEntropyLoss(weight=w)
         else :
             self.ce_fn = nn.CrossEntropyLoss()
         self.softmax = nn.Softmax(dim=1)
         self.eps = eps
-        self.sum_dims = (0,2,3)
+        self.sum_dims = (0,3,4)
         if(self.loss_type=="dice loss"):
             print("loss is set to dice")
             self.loss_fn = DiceLoss(self.eps,self.sum_dims)
@@ -44,47 +49,54 @@ class UnetLoss(nn.Module):
                 t_alpha = args["t_alpha"]
                 )
         self.cldice_fn = CLDiceLoss(sum_dims=self.sum_dims,eps=self.eps,k=self.k) 
-    def forward(self,pred_mask , gt_mask ):
+    def forward(self,masks,pred_masks,stop_labels,pred_stop_labels,
+                batch_size=None,seq_len=None):
         """
-        pred_mask : (BxT,C,H,W)
-        gt_maks : (BxT,H,W)
+        masks : (BxT,C,H,W)
+        pred_masks : (BxT,class_counts,H,W)
+        stop_labels : (BxT)
+        pred_stop_labels : (BxT)
         """
-        onehot_mask = F.one_hot(gt_mask, num_classes=self.class_count)
-        onehot_mask = onehot_mask.permute(0, 3, 1, 2).float()  
+        onehot_masks = F.one_hot(masks, num_classes=self.class_count)
+        onehot_masks = onehot_masks.permute(0, 3, 1, 2).float()  
 
-        prob = self.softmax(pred_mask)
+        stop_labels = stop_labels.reshape(-1).float()
+        pred_stop_labels = pred_stop_labels.reshape(-1)
+
+        prob = self.softmax(pred_masks)
         
         # Cross Entropy Loss
-        ce_loss = self.ce_fn(pred_mask,gt_mask)
+        ce_loss = self.ce_fn(pred_masks,masks)
         # Dice/Tversky Loss
-        forground_prob = prob[:,1:]
-        forground_onehot_mask = onehot_mask[:,1:]
+        forground_probs = prob[:,1:]
+        forground_onehot_masks = onehot_masks[:,1:]
         # present_class = forground_onehot_mask.sum(dim=self.sum_dims)>0
         
-        second_loss = self.loss_fn(
-            pred_probs = forground_prob,
-            gt = forground_onehot_mask
+        second_loss , class_wise_loss = self.loss_fn(
+            pred_probs = forground_probs,
+            gt = forground_onehot_masks,
+            batch_size = batch_size,
+            seq_len = seq_len
         )
-
-
-
-        total_loss = second_loss + ce_loss
+        # stop_loss = self.stop_ce(pred_stop_labels,stop_labels)
+        total_loss = ce_loss + second_loss #+ (0.1*stop_loss)
 
         loss_dict = {
-            "CE loss" : ce_loss,
-            self.loss_type : second_loss
+            "CE Loss" : ce_loss,
+            # "Stop Loss":stop_loss,
+           self.loss_type : second_loss
         }
-        return total_loss , loss_dict
+        return total_loss , loss_dict , class_wise_loss
 
 class FocalCrossEntropy(nn.Module):
-    def __init__(self,f_gamma,eps,f_loss_scale=1,f_alpha=None):
+    def __init__(self,f_gamma,eps,f_loss_scale=1,mask_ce_weights=None):
         super(FocalCrossEntropy,self).__init__()
         self.f_gamma = f_gamma
-        if(f_alpha is not None):
+        if(mask_ce_weights is not None):
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.f_alpha = torch.tensor(f_alpha).to(device)
+            self.mask_ce_weights = torch.tensor(mask_ce_weights).to(device)
         else:
-            self.f_alpha = f_alpha
+            self.mask_ce_weights = mask_ce_weights
         self.eps = eps
         self.f_loss_scale = f_loss_scale
     def forward(self,prob,onehot_mask):
@@ -96,8 +108,8 @@ class FocalCrossEntropy(nn.Module):
         pt = torch.clamp(p,self.eps,1-self.eps)
         focal_weights = (1-pt)**self.f_gamma
         focal_loss = focal_weights*(torch.log(pt))
-        if(self.f_alpha is not None):
-            alpha_b = self.f_alpha.view(1, -1, 1, 1).type_as(prob)
+        if(self.mask_ce_weights is not None):
+            alpha_b = self.mask_ce_weights.view(1, -1, 1, 1).type_as(prob)
             class_w = (alpha_b*onehot_mask).sum(dim=1)
         else :
             class_w = 1.0
@@ -154,7 +166,12 @@ class TverskyLoss(nn.Module):
         else:
             self.t_alpha = None
 
-    def forward(self, pred_probs, gt):
+    def forward(self, pred_probs, gt,batch_size=None,seq_len =None):
+        
+        if(batch_size is not None):
+            pred_probs = pred_probs.reshape((batch_size,seq_len,*pred_probs.shape[1:]))
+            gt = gt.reshape((batch_size,seq_len,*gt.shape[1:]))
+
         gt = gt.float()
         tp = (gt * pred_probs).sum(dim=self.sum_dims)
         fp = ((1 - gt) * pred_probs).sum(dim=self.sum_dims)
@@ -162,10 +179,12 @@ class TverskyLoss(nn.Module):
         ti = (tp + self.eps) / (tp + self.alpha * fp + self.beta * fn + self.eps)
         
         loss_c = (1 - ti).clamp_min(0) ** self.gamma
+        if(batch_size is not None):
+            loss_c = loss_c.reshape(-1)
         if self.t_alpha is None:
-            return loss_c.mean()
+            return loss_c.mean() , loss_c.detach().cpu().numpy()
         w = self.t_alpha
-        return (w * loss_c).sum() / (w.sum() + self.eps)
+        return (w * loss_c).sum() / (w.sum() + self.eps) , loss_c.detach().cpu().numpy()
     
     
     

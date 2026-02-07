@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 ###IE###
 from utils.helpers import (
     draw_mask , compute_confution_matrix ,no_teacher_forcing_pipeline,
-    process_targets , make_example_datasets
+    process_masks , make_example_datasets , denormalize
 )
 from build_notebook import build_kaggle_project
 ###SS###
@@ -255,43 +255,40 @@ def draw_examples(model,args,class_map,valid_images,
             for j in range(1,len(class_map)+1)
         ]
         img_index = 1
-        for contexts , targets in tqdm(dalaloader):
-            with torch.autocast(device_type=args["device"],dtype=torch.float16):
-                pred_targets , targets ,b_size , t_max= no_teacher_forcing_pipeline(
-                    model = model,
-                    contexts = contexts,
-                    targets = targets,
-                    class_count = class_count,
-                    device = device
-                )
-            targets = targets.cpu()
-            pred_targets = pred_targets.reshape(-1,class_count,
-                                             targets.shape[2],targets.shape[3])
-            targets = targets.reshape(-1,targets.shape[2],targets.shape[3])
+        for imgs , masks , stop_labels , full_masks in tqdm(dalaloader):
+            seq_len = masks.shape[1]
+            b_size = imgs.shape[0]
+            masks = masks.reshape(-1,*masks.shape[2:])
 
-            pred_targets , targets = process_targets(
-                pred_targets=pred_targets,
-                targets= targets,
+            imgs = imgs.to(device)
+            masks = masks.to(device)
+            stop_labels = stop_labels.to(device)
+            with torch.autocast(device_type=args["device"],dtype=torch.float16):
+                pred_stop_labels,pred_masks =  model(imgs,seq_len)
+            masks = masks.cpu()
+            full_masks = full_masks.to(device)
+            pred_masks  = process_masks(
+                pred_targets=pred_masks,
                 b_size=b_size,
-                t_max=t_max,
-                target_shape=(targets.shape[1],targets.shape[2]),
+                t_max=seq_len,
+                target_shape=(masks.shape[1],masks.shape[2]),
                 class_count=class_count
             )
-
-            pred_targets = pred_targets.cpu().numpy()
-            pred_targets = np.argmax(pred_targets,axis=1) # B x H x W
-
-            targets = targets.numpy()
-
-            img = contexts[0,1].cpu().numpy() # H x W
-            target = targets[0] # H x W
-            pred_target = pred_targets[0] #H x W
+            full_masks = full_masks.cpu().numpy()
             
-            x_disp = (img - img.min()) / (img.max() - img.min() + 1e-8)
-            rgb = np.repeat(x_disp[..., None], 3, axis=2)*255
+            pred_masks = pred_masks.cpu().numpy()
+            pred_masks = np.argmax(pred_masks,axis=1) # B x H x W
 
-            real_annoted = draw_mask(rgb,target,args,colors)
-            pred_annoted = draw_mask(rgb,pred_target,args,colors)
+            imgs = imgs.permute(0,2,3,1) # B x H x W x C
+            img = imgs[0].cpu().numpy() # H x W x C
+            img = denormalize(img)
+
+            full_mask = full_masks[0] # H x W
+            pred_mask = pred_masks[0] #H x W
+            
+
+            real_annoted = draw_mask(img,full_mask,args,colors)
+            pred_annoted = draw_mask(img,pred_mask,args,colors)
             
             plt.subplot(h,w,img_index)
             plt.imshow(real_annoted)
@@ -309,3 +306,4 @@ def draw_examples(model,args,class_map,valid_images,
                     title="Classes"
                 )
         plt.savefig(plt_path)
+        
