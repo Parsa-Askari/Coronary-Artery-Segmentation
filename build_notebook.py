@@ -113,6 +113,7 @@ def build_kaggle_project(outpath,notebook_name = "multi_main.ipynb"):
             "./models/nnunet.py",
             "./models/swin_encoder.py",
             "./models/swin_blocks.py",
+            "./models/conv_lstm.py",
             "./utils/losses.py",
             "./trainer.py"
         ],

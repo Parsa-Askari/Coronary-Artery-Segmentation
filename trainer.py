@@ -7,23 +7,56 @@ from sklearn.metrics import accuracy_score
 ###IE###
 from utils.helpers import TP_TN_FP_FN , process_masks , no_teacher_forcing_pipeline
 ###SS###
-def train_fn(model,imgs,masks,stop_labels,optimizer,loss_fn,scaler,args,seq_len):
+def train_fn(model,imgs,masks,m_labels,m_takens,current_labels,optimizer,
+             loss_fn,scaler,args,device):
     optimizer.zero_grad()
     loss_dict={}
     b_size=imgs.shape[0]
-    with torch.autocast(device_type=args["device"],dtype=torch.float16):
+    seq_len = imgs.shape[1]
+    mini_batch_size = args["mini_batch_size"]
+    itter_count = (seq_len//mini_batch_size) + 1
 
-        pred_stop_labels,pred_masks =  model(imgs,seq_len=seq_len)
+    imgs = imgs.to(device)
+    loss_dict = {}
+    loss = 0
+    full_mask_preds = []
+    for i in range(itter_count):
+        mini_imgs = imgs[:,i*mini_batch_size:(i+1)*mini_batch_size]
+        mini_m_labels = m_labels[:,i*mini_batch_size:(i+1)*mini_batch_size]
+        mini_m_takens = m_takens[:,i*mini_batch_size:(i+1)*mini_batch_size]
+        mini_current_labels = current_labels[:,i*mini_batch_size:(i+1)*mini_batch_size]
+
+        mini_imgs = mini_imgs.to(device)
+        mini_m_labels = mini_m_labels.to(device)
+        mini_m_takens = mini_m_takens.to(device)
+        mini_current_labels = mini_current_labels.to(device)
+
+        B,T,C,H,W = mini_imgs.shape
+        class_counts = mini_current_labels.shape[-1]
         
-        loss , loss_dict , class_wise_loss = loss_fn(
-            masks = masks,
-            pred_masks = pred_masks,
-            stop_labels = stop_labels,
-            pred_stop_labels = pred_stop_labels,
-            batch_size = b_size,
-            seq_len = seq_len
-        )
+        with torch.autocast(device_type=args["device"],dtype=torch.float16):
         
+            pred_m_labels , pred_current_labels , _ =  model(
+                img = mini_imgs[:,:-1].reshape(-1,C,H,W),
+                m_taken = mini_m_takens[:,:-1].float().reshape(-1,1,H,W),
+                v_seen = torch.cumsum(mini_current_labels[:,:-1],dim=1).float().reshape(-1,class_counts)
+            )
+
+            mini_loss , mini_loss_dict = loss_fn(
+                pred_m_labels = pred_m_labels,
+                gt_m_labels = mini_m_labels[:,1:].reshape(-1,H,W),
+                pred_current_labels = pred_current_labels,
+                gt_current_labels = mini_current_labels[:,1:].reshape(-1,class_counts)
+            )
+        print(pred_m_labels.shape)
+        full_mask_preds.append(pred_m_labels.reshape(B,T,class_counts,H,W).detach())
+
+        loss += mini_loss
+        for key , l in mini_loss_dict.items():
+            if(key not in loss_dict):
+                loss_dict[key]=0
+            loss_dict[key]+=l
+
 
     scaler.scale(loss).backward()
     scaler.unscale_(optimizer)
@@ -33,21 +66,23 @@ def train_fn(model,imgs,masks,stop_labels,optimizer,loss_fn,scaler,args,seq_len)
         with torch.no_grad():
             print("--- Total Norm ---")
             print(total_norm)
-            print("\n--- Gradient norms ---")
-            for name, param in model.named_parameters():
-                if param.grad is not None:
-                    grad_norm = param.grad.data.norm().item()
-                    print(f"{name:30s}: {grad_norm:.6f}")
+            # print("\n--- Gradient norms ---")
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         grad_norm = param.grad.data.norm().item()
+            #         print(f"{name:30s}: {grad_norm:.6f}")
             print("----------------------\n")
     scaler.step(optimizer)
     scaler.update()
-    
+    for l in full_mask_preds:
+        print(l.shape)
+    full_mask_preds = torch.cat(full_mask_preds,dim=1)
     loss = loss.detach().cpu().item()
     for loss_name in loss_dict:
         loss_dict[loss_name] = loss_dict[loss_name].detach().cpu().item()
     
     loss_dict["total loss"] = loss
-    return loss_dict , pred_masks.detach(), masks.detach() , class_wise_loss
+    return loss_dict , full_mask_preds
     
 def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,
             lr_sch=None,loss_weights=[1]):
@@ -68,51 +103,47 @@ def trainer(args,recorder,model,optimizer,loss_fn,train_loader,valid_loader,
         
         model.train()
         class_wise_report = False
-        for imgs , masks , stop_labels , full_masks in tqdm(train_loader) : 
+        for imgs , masks , m_labels , m_takens , current_labels in tqdm(train_loader) : 
             """
-            img : (B,C,H,W)
-            targets : (B,seq_len,H,W)
-            stop_labels : (B,seq_len)
+            img : (B,seq_len,C,H,W)
+            masks : (B,1,H,W)
+            m_labels : (B, seq_len, H, W)
+            m_takens : (B, seq_len, 1, H, W)
+            current_labels : (B, seq_len, 26)
             """
             seq_len = masks.shape[1]
             b_size = imgs.shape[0]
 
-            masks = masks.reshape(-1,*target_shape)
-
-            imgs = imgs.to(device)
-            masks = masks.to(device)
-            stop_labels = stop_labels.to(device)
-
-            
-            loss_dict , pred_masks , masks , class_wise_loss= train_fn(
+            loss_dict , mask_preds = train_fn(
                 model = model,
                 imgs = imgs,
                 masks = masks,
-                stop_labels = stop_labels,
+                m_labels = m_labels,
+                m_takens = m_takens,
+                current_labels = current_labels,
                 optimizer = optimizer,
                 loss_fn = loss_fn,
                 scaler = scaler,
                 args = args,
-                seq_len = seq_len
+                device = device
 
             )
-            masks = masks.cpu()
-            full_masks = full_masks.to(device)
+            masks = masks.to(device)
 
-            pred_masks  = process_masks(
-                pred_targets=pred_masks,
+            mask_preds  = process_masks(
+                pred_targets=mask_preds,
                 b_size=b_size,
                 t_max=seq_len,
                 target_shape=target_shape,
                 class_count=class_count
             )
 
-            TP , _ , FP , FN = TP_TN_FP_FN(pred_masks,full_masks,process_preds=False)
+            TP , _ , FP , FN = TP_TN_FP_FN(mask_preds,masks,process_preds=False)
             total_TP += TP
             total_FP += FP
             total_FN += FN
             
-            recorder.add_losses("train",loss_dict,class_wise_loss)
+            recorder.add_losses("train",loss_dict)
 
             
         current_lr = [group['lr'] for group in optimizer.param_groups][0]
@@ -195,8 +226,7 @@ def evaluation(recorder,model,loss_fn,valid_loader,class_count,report_class_wise
                 pred_masks = pred_masks,
                 stop_labels = stop_labels,
                 pred_stop_labels = pred_stop_labels,
-                batch_size = b_size,
-                seq_len = seq_len
+
             )
             masks = masks.cpu()
             full_masks = full_masks.to(device)

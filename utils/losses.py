@@ -11,18 +11,18 @@ class UnetLoss(nn.Module):
         super(UnetLoss,self).__init__()
         self.class_count = args["class_count"]
         self.loss_type = args["loss_type"]
-        self.alpha = args["alpha"]
-        self.beta = args["beta"]
-        self.t_gamma = args["t_gamma"]
         self.mask_ce_weights = args["mask_ce_weights"]
-        self.k = args["k"]
+        self.eps = eps
+        self.args = args
+        self.sum_dims = (0,2,3)
+        
         # self.focal_fn = FocalCrossEntropy(
         #     f_gamma=self.f_gamma,
         #     eps=eps,
-        #     mask_ce_weights=args["mask_ce_weights"],
-        #     f_loss_scale = args["f_loss_scale"]
+        #     args=args["focal_ce_conf"]
         # )
-        self.stop_ce = nn.BCEWithLogitsLoss()
+        self.softmax = nn.Softmax(dim=1)
+        self.current_label_loss_fn = nn.CrossEntropyLoss()
         if(args["mask_ce_weights"] is not None):
             w = torch.tensor(
                 args["mask_ce_weights"],
@@ -30,75 +30,76 @@ class UnetLoss(nn.Module):
                 device="cuda"
             )
             self.ce_fn = nn.CrossEntropyLoss(weight=w)
+            
         else :
             self.ce_fn = nn.CrossEntropyLoss()
-        self.softmax = nn.Softmax(dim=1)
-        self.eps = eps
-        self.sum_dims = (0,3,4)
-        if(self.loss_type=="dice loss"):
+
+        if(self.loss_type=="dice"):
             print("loss is set to dice")
             self.loss_fn = DiceLoss(self.eps,self.sum_dims)
-        elif(self.loss_type=="tversky loss"):
+        elif(self.loss_type=="tversky"):
             print("loss is set to tversky")
             self.loss_fn = TverskyLoss(
                 eps = self.eps,
                 sum_dims= self.sum_dims,
-                alpha = self.alpha,
-                beta = self.beta,
-                gamma = self.t_gamma,
-                t_alpha = args["t_alpha"]
-                )
-        self.cldice_fn = CLDiceLoss(sum_dims=self.sum_dims,eps=self.eps,k=self.k) 
-    def forward(self,masks,pred_masks,stop_labels,pred_stop_labels,
-                batch_size=None,seq_len=None):
+                args = args["tversky_conf"]
+            )
+    def forward(self,pred_m_labels,gt_m_labels,pred_current_labels,gt_current_labels):
         """
-        masks : (BxT,C,H,W)
-        pred_masks : (BxT,class_counts,H,W)
-        stop_labels : (BxT)
-        pred_stop_labels : (BxT)
+        pred_m_labels : (BxT,class_counts,H,W)
+        gt_m_labels : (BxT,H,W)
+        pred_current_labels : (BxT,class_counts)
+        gt_current_labels : (BxT,class_counts)
         """
-        onehot_masks = F.one_hot(masks, num_classes=self.class_count)
-        onehot_masks = onehot_masks.permute(0, 3, 1, 2).float()  
 
-        stop_labels = stop_labels.reshape(-1).float()
-        pred_stop_labels = pred_stop_labels.reshape(-1)
+        onehot_gt_masks = F.one_hot(gt_m_labels, num_classes=self.class_count)
+        onehotgt__masks = onehot_gt_masks.permute(0, 3, 1, 2).float()
 
-        prob = self.softmax(pred_masks)
+        gt_current_labels = torch.argmax(gt_current_labels,dim=1)
+
+        prob = self.softmax(pred_m_labels)
         
-        # Cross Entropy Loss
-        ce_loss = self.ce_fn(pred_masks,masks)
+        ### Mask Losses
+        # Cross Entropy Loss 
+        mask_ce_loss = self.ce_fn(pred_m_labels,gt_m_labels)
         # Dice/Tversky Loss
         forground_probs = prob[:,1:]
-        forground_onehot_masks = onehot_masks[:,1:]
-        # present_class = forground_onehot_mask.sum(dim=self.sum_dims)>0
-        
-        second_loss , class_wise_loss = self.loss_fn(
+        forground_onehot_masks = onehotgt__masks[:,1:]
+        second_loss = self.loss_fn(
             pred_probs = forground_probs,
-            gt = forground_onehot_masks,
-            batch_size = batch_size,
-            seq_len = seq_len
+            gt = forground_onehot_masks
         )
-        # stop_loss = self.stop_ce(pred_stop_labels,stop_labels)
-        total_loss = ce_loss + second_loss #+ (0.1*stop_loss)
+        ## Current Label Losses
+        current_label_loss = self.current_label_loss_fn(
+            pred_current_labels,
+            gt_current_labels
+        )
+
+        total_loss = (
+            self.args["mask_ce_conf"]["imp_coef"]*mask_ce_loss 
+            + self.args[f"{self.loss_type}_conf"]["imp_coef"]*second_loss 
+            + self.args["label_ce_conf"]["imp_coef"]*current_label_loss
+        )
 
         loss_dict = {
-            "CE Loss" : ce_loss,
-            # "Stop Loss":stop_loss,
-           self.loss_type : second_loss
+            "mask CE-Loss" : mask_ce_loss,
+            "label CE-Loss": current_label_loss,
+            self.loss_type : second_loss
         }
-        return total_loss , loss_dict , class_wise_loss
+        return total_loss , loss_dict
 
 class FocalCrossEntropy(nn.Module):
-    def __init__(self,f_gamma,eps,f_loss_scale=1,mask_ce_weights=None):
+    def __init__(self,args,eps,mask_ce_weights=None):
         super(FocalCrossEntropy,self).__init__()
-        self.f_gamma = f_gamma
+        self.eps = eps
+        self.f_loss_scale = args["loss_scale"]
+        self.f_gamma = args["gamma"]
         if(mask_ce_weights is not None):
             device = "cuda" if torch.cuda.is_available() else "cpu"
             self.mask_ce_weights = torch.tensor(mask_ce_weights).to(device)
         else:
             self.mask_ce_weights = mask_ce_weights
-        self.eps = eps
-        self.f_loss_scale = f_loss_scale
+
     def forward(self,prob,onehot_mask):
         # prob : (B,C,H,W)
         # onehot_mask : (B,C,H,W)
@@ -153,16 +154,16 @@ class DiceLoss(nn.Module):
         return dice_loss
 
 class TverskyLoss(nn.Module):
-    def __init__(self, eps=1e-6, sum_dims=(0,2,3), alpha=0.3, beta=0.7, gamma=1.33, t_alpha=None):
+    def __init__(self, args,eps=1e-6, sum_dims=(0,2,3) ):
         super().__init__()
         self.eps = eps
         self.sum_dims = sum_dims
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        device = "cuda" if torch.cuda.is_available() else "cput"
-        if t_alpha is not None:
-            self.register_buffer("t_alpha", torch.tensor(t_alpha, dtype=torch.float32,device=device))
+        self.alpha = args["alpha"]
+        self.beta = args["beta"]
+        self.gamma = args["gamma"]
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if args["weights"] is not None:
+            self.register_buffer("t_alpha", torch.tensor(args["weights"], dtype=torch.float32,device=device))
         else:
             self.t_alpha = None
 
@@ -180,11 +181,12 @@ class TverskyLoss(nn.Module):
         
         loss_c = (1 - ti).clamp_min(0) ** self.gamma
         if(batch_size is not None):
+            
             loss_c = loss_c.reshape(-1)
         if self.t_alpha is None:
-            return loss_c.mean() , loss_c.detach().cpu().numpy()
+            return loss_c.mean() 
         w = self.t_alpha
-        return (w * loss_c).sum() / (w.sum() + self.eps) , loss_c.detach().cpu().numpy()
+        return (w * loss_c).sum() / (w.sum() + self.eps) 
     
     
     

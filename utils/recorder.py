@@ -34,6 +34,7 @@ class HistoryRecorder:
     def add_losses(self,part,loss_dict,class_wise_loss=None):
         for loss_name,loss in loss_dict.items():
             self.history[part][loss_name][-1] += [loss]
+        # print(class_wise_loss.shape)
         self.class_wise_losses[part].append(class_wise_loss)
 
     def add_metrics(self,dice,precision,recall,part):
@@ -70,14 +71,17 @@ class HistoryRecorder:
             co+=1  
         if(class_wise==True):
             report +="\nclass wise loss :\n"
-            self.class_wise_losses[part] = np.concatenate(
-                self.class_wise_losses[part]
-            ).mean(axis=0) # (C-1)
+            
+            self.class_wise_losses[part] = np.stack(
+                self.class_wise_losses[part] ,axis=0
+            ).mean(axis=0).tolist() # (C-1)
             for i , class_loss in enumerate(self.class_wise_losses[part]):
-                c = self.class_maps[i]
+                c = self.class_maps[i+1]
                 report += f"{c} : {class_loss}\n"
-                self.class_wise_losses["part"]=[]
+                
+            self.class_wise_losses[part]=[] 
             report += "=========================="
+            
         print(report)
     def print_metrics_report(self,part,epoch,class_wise=False):
         

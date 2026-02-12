@@ -30,7 +30,7 @@ def read_images(base_path, part,preprocessor,max_workers=None,chosen_labels = No
         name_stem = Path(fname).stem
         img_path = images_base / fname
         label_path = labels_base / f"{name_stem}.zarr"
-        img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+        img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
         if(preprocessor):
             img = preprocessor(img)
         label = zarr.load(str(label_path))
@@ -122,13 +122,10 @@ def padd_dims(target , current):
 def process_masks(pred_targets , b_size , t_max , target_shape , class_count):
     """
     inputs : pred_targets , targets
-        - pred_targets = B x T , class_counts , H , W
-        - targets = B x T , H , W 
+        - pred_targets = B , T , class_counts , H , W
     outputs : pred_targets , targets
         - pred_targets = B , class_count , H , W 
-        - targets = B , H , W
     """
-    pred_targets = pred_targets.view(b_size,t_max,class_count,*target_shape) # B,T,class_count,H,W
     pred_targets = torch.logsumexp(pred_targets, dim=1) # B,class_count,H,W
     pred_targets = pred_targets.argmax(dim=1) # B,H,W
     pred_targets = F.one_hot(pred_targets, num_classes=class_count) # B , H , W , class_count

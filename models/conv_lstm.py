@@ -2,8 +2,10 @@ import torch
 import torch.nn as nn
 import numpy as np
 from torchvision import models
+from torchvision.models import VGG16_Weights
 import torch.nn.functional as F
-
+###IE###
+###SS###
 class ConvLSTMBlock(nn.Module):
     def __init__(self,feature_map_size,hidden_size,kernel_size,padding):
         super(ConvLSTMBlock,self).__init__()
@@ -83,30 +85,21 @@ class ConvLSTM(nn.Module):
             outputs.append(H[-1])
 
         return torch.stack(outputs, dim=0)
-
-class FCN(nn.Module):
+class VGG16_Convs(nn.Module):
     def __init__(self):
-        super(FCN,self).__init__()
-        resnet = models.resnet50(
-            weights=models.ResNet50_Weights.DEFAULT,
-            replace_stride_with_dilation=[False, True, True]
-        )
-        self.conv1 = resnet.conv1
-        self.bn1 = resnet.bn1
-        self.relu = resnet.relu
-        self.maxpool = resnet.maxpool
-        self.layer1 = resnet.layer1
-        self.layer2 = resnet.layer2
-        self.layer3 = resnet.layer3
-        self.layer4 = resnet.layer4 
+        super(VGG16_Convs,self).__init__()
+        self.vgg = models.vgg16(weights = VGG16_Weights.IMAGENET1K_V1,
+                           progress = True).features
+    def forward(self,x):
+        return self.vgg(x)
+    
+class FCN_8s(nn.Module):
+    def __init__(self,class_count):
+        super(FCN_8s,self).__init__()
+        self.vgg_convs = VGG16_Convs()
 
-    def forward(self, x):
-        x = self.maxpool(self.relu(self.bn1(self.conv1(x))))
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        return x
+        # Head Layers 
+        self.fc6 = nn.Conv2d(in_channels=512,out_channels=1)
 
 class FullConvLSTM(nn.Module):
     def __init__(self,args):
@@ -119,7 +112,7 @@ class FullConvLSTM(nn.Module):
         class_count = args["class_count"]
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self.fcn = FCN()
+        self.fcn = VGG16_Convs()
         
         self.conv_lstm_model = ConvLSTM(
             feature_map_size=feature_map_size,

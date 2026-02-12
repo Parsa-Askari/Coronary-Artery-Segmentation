@@ -13,43 +13,53 @@ from torch.utils.data import Sampler
 ###SS###
 def collate_fn_train(batch):
     """
-    batch : list of batches [img , targets , stops] 
+    batch : list of batches [img, mask , m_labels, m_taken] 
         -   img : (C,H,W)
-        -   targets : (unique_len,H,W)
-        -   stops : (unique_len)
-        -   full_masks : (H,W)
+        -   mask : (H,W)
+        -   m_labels : (unique_len,H,W)
+        -   m_taken : (unique_len,H,W)
     """
     lengths = [x[2].shape[0] for x in batch]
-    max_t = max(lengths)
+    max_t = max(lengths)+1
     batch_size = len(batch)
     
-    H, W, C = batch[0][0].shape 
+    C , H, W = batch[0][0].shape 
     
-    batch_imgs = torch.zeros((batch_size,C,H, W), dtype=torch.float32)
-    batch_targets = torch.zeros((batch_size, max_t, H, W), dtype=torch.long)
-    batch_stops = torch.zeros((batch_size, max_t), dtype=torch.long)
-    batch_full_masks = torch.zeros((batch_size, H, W), dtype=torch.long)
+    batch_imgs = torch.zeros((batch_size,max_t,C,H, W), dtype=torch.float32)
+    batch_masks = torch.zeros((batch_size, H, W), dtype=torch.long)
+    batch_m_labels = torch.zeros((batch_size, max_t, H, W), dtype=torch.long)
+    batch_m_taken = torch.zeros((batch_size, max_t, 1, H, W), dtype=torch.long)
+    batch_current_label = torch.zeros((batch_size, max_t, 26), dtype=torch.long)
 
-    for i, (img, target, stop_label , full_mask) in enumerate(batch):
+    for i, (img, mask , m_labels, m_taken) in enumerate(batch):
         t = lengths[i]
-        
-        img_t = torch.from_numpy(img).permute(2,0,1)
-        target_t = torch.from_numpy(target)
-        stop_label_t = torch.from_numpy(stop_label)
-        full_mask_t = torch.from_numpy(full_mask)
-        
-        batch_imgs[i] = img_t
-        batch_targets[i, :t] = target_t 
-        batch_stops[i, :t] = stop_label_t
-        batch_full_masks[i] = full_mask_t
+        u = np.unique(mask)[1:].astype(int)
 
+        img_t = torch.from_numpy(img)
+        mask_t = torch.from_numpy(mask)
+        m_labels_t = torch.from_numpy(m_labels)
+        m_taken_t = torch.from_numpy(m_taken)
+        u_t = torch.from_numpy(u)
+
+        batch_imgs[i,:] = img_t
+        batch_masks[i] = mask_t 
+        batch_m_labels[i, :t] = m_labels_t
+        batch_m_taken[i, :t, 0] = m_taken_t
+
+        batch_current_label[i,torch.arange(len(u)) ,u_t] = 1
+        batch_current_label[i, u.shape[0] ,0] = 1
+        
+        batch_m_taken[i , t:] = m_taken_t[-1]
+
+    # batch_current_label = torch.cumsum(batch_current_label,dim=1)
     """
-    batch_imgs : (B,C,H,W)
-    batch_targets : (B,seq_len,H,W)
-    batch_size : (B,seq_len)
-    batch_full_masks : (B,H,W)
+    batch_imgs : (B,seq_len,C,H,W)
+    batch_masks : (B, H, W)
+    batch_m_labels : (B, seq_len, H, W)
+    batch_m_taken : (B, seq_len, 1, H, W)
+    batch_current_label : (B, max_t, 26)
     """
-    return batch_imgs, batch_targets, batch_stops, batch_full_masks
+    return batch_imgs, batch_masks, batch_m_labels, batch_m_taken , batch_current_label
 
 class TrainUnetDataset(Dataset):
     def __init__(self, transform, data):
@@ -78,7 +88,7 @@ class TrainUnetDataset(Dataset):
         if torch.is_tensor(new_mask): new_mask = new_mask.numpy()
         
         # turn image shape to : (C,H,W)
-        if new_image.ndim == 3 and new_image.shape[-1] == 1: 
+        if new_image.ndim == 3 : 
             new_image = new_image.transpose(2, 0, 1) 
         elif new_image.ndim == 2:
             new_image = new_image[None, :, :] 
@@ -87,15 +97,17 @@ class TrainUnetDataset(Dataset):
 
         u = np.unique(new_mask)
         labels = u[1:] if u[0] == 0 else u
-        # targets : (unique_len,H,W)
-        targets = (new_mask[None, :, :] == labels[:, None, None]).astype(np.float32) * labels[:, None, None]
-        # NOTE : we add an stop token here also with the shape (1,H,W) full zero
-        stop_token = np.zeros((1,new_mask.shape[0],new_mask.shape[1]),dtype=np.float32)
-        targets = np.concatenate([targets,stop_token],axis=0)
-        # stop labels = (unique_len+1)
-        stop_labels = np.ones(len(labels)+1)
-        stop_labels[-1] = 0
-        return new_image, targets, stop_labels ,new_mask
+        # m_labels : (unique_len,H,W)
+        start_mask = np.zeros((1,new_image.shape[1],new_image.shape[2]))
+        m_labels = (new_mask[None, :, :] == labels[:, None, None]).astype(np.float32) * labels[:, None, None]
+        
+
+        m_labels = np.concatenate([start_mask,m_labels],axis=0)
+        # m_taken : (unique_len,H,W)
+        m_taken = (np.cumsum(m_labels,axis=0)!=0).astype(int)
+
+
+        return new_image, new_mask , m_labels, m_taken
 
 
 class UnetExampleDataset(Dataset):
