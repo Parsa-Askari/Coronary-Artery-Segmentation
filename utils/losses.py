@@ -12,17 +12,13 @@ class UnetLoss(nn.Module):
         self.class_count = args["class_count"]
         self.loss_type = args["loss_type"]
         self.mask_ce_weights = args["mask_ce_weights"]
+        self.training_mode = args["training_mode"]
         self.eps = eps
         self.args = args
         self.sum_dims = (0,2,3)
         
-        # self.focal_fn = FocalCrossEntropy(
-        #     f_gamma=self.f_gamma,
-        #     eps=eps,
-        #     args=args["focal_ce_conf"]
-        # )
         self.softmax = nn.Softmax(dim=1)
-        self.current_label_loss_fn = nn.CrossEntropyLoss()
+        ### masks cross-entropy loss (SHARED)
         if(args["mask_ce_weights"] is not None):
             w = torch.tensor(
                 args["mask_ce_weights"],
@@ -30,62 +26,71 @@ class UnetLoss(nn.Module):
                 device="cuda"
             )
             self.ce_fn = nn.CrossEntropyLoss(weight=w)
-            
+                
         else :
             self.ce_fn = nn.CrossEntropyLoss()
-
+        ### masks dice loss (SHARED)
         if(self.loss_type=="dice"):
-            print("loss is set to dice")
-            self.loss_fn = DiceLoss(self.eps,self.sum_dims)
+                print("loss is set to dice")
+                self.loss_fn = DiceLoss(self.eps,self.sum_dims)
         elif(self.loss_type=="tversky"):
             print("loss is set to tversky")
             self.loss_fn = TverskyLoss(
                 eps = self.eps,
                 sum_dims= self.sum_dims,
-                args = args["tversky_conf"]
+                args = args["tversky_conf"])
+        ### JUST BINARY
+
+        if(self.training_mode=="binary"):
+            self.cl_dice_loss_fn = CLDiceLoss(
+                eps=eps,
+                sum_dims=self.sum_dims,
+                k=args["cl_dice_conf"]["k"]
             )
-    def forward(self,pred_m_labels,gt_m_labels,pred_current_labels,gt_current_labels):
-        """
-        pred_m_labels : (BxT,class_counts,H,W)
-        gt_m_labels : (BxT,H,W)
-        pred_current_labels : (BxT,class_counts)
-        gt_current_labels : (BxT,class_counts)
-        """
 
-        onehot_gt_masks = F.one_hot(gt_m_labels, num_classes=self.class_count)
-        onehotgt__masks = onehot_gt_masks.permute(0, 3, 1, 2).float()
+    def forward(self,pred_masks,gt_masks):
+        if(self.training_mode=="binary"):
+            """
+            inputs : pred_masks , gt_masks
+                - pred_masks : (B,2,H,W)
+                - gt_masks : (B,H,W)
 
-        gt_current_labels = torch.argmax(gt_current_labels,dim=1)
+            """
+            onehot_gt_masks = F.one_hot(gt_masks, num_classes=self.class_count)
+            onehot_gt_masks = onehot_gt_masks.permute(0, 3, 1, 2).float()
 
-        prob = self.softmax(pred_m_labels)
+            pred_probs = self.softmax(pred_masks)
+
+            ### Cross Entropy Loss
+            mask_ce_loss = self.ce_fn(pred_masks,gt_masks)
+            ### Mask Dice Losses
+            fg_pred_probs = pred_probs[:,1:]
+            fg_onehot_gt_masks = onehot_gt_masks[:,1:]
+            dice_family_loss = self.loss_fn(
+                pred_probs = fg_pred_probs,
+                gt = fg_onehot_gt_masks
+            )
+            ### Mask CL-Dice
+            cl_dice_loss = self.cl_dice_loss_fn(
+                pred_binary_mask = pred_probs[:,1:],
+                binary_gt_mask = gt_masks.unsqueeze(1).float()
+            )
+            ### Recordings
+            total_loss = (
+                self.args["mask_ce_conf"]["imp_coef"]*mask_ce_loss 
+                + self.args[f"{self.loss_type}_conf"]["imp_coef"]*dice_family_loss 
+                + self.args["cl_dice_conf"]["imp_coef"]*cl_dice_loss
+            )
+
+            loss_dict = {
+                "mask CE-Loss" : mask_ce_loss,
+                self.loss_type : dice_family_loss,
+                "cl dice loss" : cl_dice_loss
+            }
+        elif(self.training_mode=="multi-class"):
+            pass
         
-        ### Mask Losses
-        # Cross Entropy Loss 
-        mask_ce_loss = self.ce_fn(pred_m_labels,gt_m_labels)
-        # Dice/Tversky Loss
-        forground_probs = prob[:,1:]
-        forground_onehot_masks = onehotgt__masks[:,1:]
-        second_loss = self.loss_fn(
-            pred_probs = forground_probs,
-            gt = forground_onehot_masks
-        )
-        ## Current Label Losses
-        current_label_loss = self.current_label_loss_fn(
-            pred_current_labels,
-            gt_current_labels
-        )
-
-        total_loss = (
-            self.args["mask_ce_conf"]["imp_coef"]*mask_ce_loss 
-            + self.args[f"{self.loss_type}_conf"]["imp_coef"]*second_loss 
-            + self.args["label_ce_conf"]["imp_coef"]*current_label_loss
-        )
-
-        loss_dict = {
-            "mask CE-Loss" : mask_ce_loss,
-            "label CE-Loss": current_label_loss,
-            self.loss_type : second_loss
-        }
+        
         return total_loss , loss_dict
 
 class FocalCrossEntropy(nn.Module):
@@ -121,21 +126,20 @@ class CLDiceLoss(nn.Module):
         super(CLDiceLoss,self).__init__()
         self.k=k
         self.eps = eps
-        self.sum_dims = (1,2)
+        self.sum_dims = (1,2,3)
 
-    def forward(self,pred_binary_mask , gt_mask,gt_skel):
+    def forward(self,pred_binary_mask , binary_gt_mask):
 
-        binary_pred = (pred_binary_mask>=0.5).type_as(pred_binary_mask)
-        binary_gt = (gt_mask!=0).type_as(gt_mask)
+        pred_skel = soft_skeletonize(pred_binary_mask,k=self.k)
+        gt_skel = soft_skeletonize(binary_gt_mask,k=self.k)
 
-        pred_skel = soft_skeletonize(binary_pred,k=self.k)
-
-        t_prec = (pred_skel*binary_gt + self.eps).sum(dim=self.sum_dims)/(pred_skel.sum(dim=self.sum_dims) +self.eps)
-        t_rec = (gt_skel*binary_pred + self.eps).sum(dim=self.sum_dims)/(gt_skel.sum(dim=self.sum_dims) +self.eps)
+        t_prec = (pred_skel*binary_gt_mask ).sum(dim=self.sum_dims)/(pred_skel.sum(dim=self.sum_dims) +self.eps)
+        t_rec = (gt_skel*pred_binary_mask ).sum(dim=self.sum_dims)/(gt_skel.sum(dim=self.sum_dims) +self.eps)
         
         cldice = 2*((t_prec*t_rec)/(t_prec+t_rec))
         cldice_loss = 1 - cldice.mean()
         return cldice_loss
+    
 class DiceLoss(nn.Module):
     def __init__(self,eps,sum_dims):
         super(DiceLoss,self).__init__()

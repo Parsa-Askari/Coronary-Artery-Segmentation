@@ -1,0 +1,67 @@
+{
+    "base_path": "./dataset/syntax/",
+    "memory_unet": {
+        "layer_count": 4,
+        "channel_max": 256,
+        "downsampling": "conv",
+        "dropout": true,
+        "normaliztion": "InstanceNorm2d",
+        "activation": "LeakyReLU",
+        "first_layer_out_c": 64
+    },
+    "image_shape": [
+        448,
+        448
+    ],
+    "in_c": 1,
+    "training_mode": "binary",
+    "report_class_wise": true,
+    "attention": false,
+    "batch_size": 8,
+    "num_workers": 5,
+    "device": "cuda",
+    "epcohs": 10,
+    "f_int_scale": 2,
+    "full_report_cycle": 1,
+    "max_channels": 512,
+    "loss_type": "tversky",
+    "output_base_path": "./outputs",
+    "name": "binary-tests-dropout",
+    "deep_super_vision": false,
+    "mask_ce_weights": [
+        0.1,
+        1
+    ],
+    "layer_count": 5,
+    "mask_ce_conf": {
+        "imp_coef": 1.0
+    },
+    "focal_ce_conf": {
+        "gamma": 2.0,
+        "loss_scale": 1.0,
+        "imp_coef": 1.0
+    },
+    "tversky_conf": {
+        "alpha": 0.7,
+        "beta": 0.3,
+        "gamma": 2.0,
+        "weights": null,
+        "imp_coef": 1.0,
+        "t_alpha": null
+    },
+    "cl_dice_conf": {
+        "imp_coef": 1.0,
+        "k": 40
+    },
+    "sgd_conf": {
+        "lr": 0.1,
+        "momentum": 0.99,
+        "weight_decay": 3e-05,
+        "nesterov": true
+    },
+    "adam_conf": {
+        "lr": 0.01,
+        "weight_decay": 3e-05
+    },
+    "class_count": 2
+}

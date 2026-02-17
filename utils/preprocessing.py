@@ -24,8 +24,8 @@ class WhiteTopHat:
         return cv2.subtract(img, tophat_img)
         
 # Augementations 
-def normalize_xca(img, **kwargs):
-    x = img.astype(np.float32, copy=False)
+def normalize_xca(image):
+    x = image.astype(np.float32, copy=False)
     m = x > 0
     if np.any(m):
         mean = x[m].mean()
@@ -34,7 +34,10 @@ def normalize_xca(img, **kwargs):
         x[~m] = 0.0
     else:
         x = x / 1.0
-    return x
+
+
+    return {"image":x}
+
 def _clip_like_input(out: np.ndarray, ref: np.ndarray) -> np.ndarray:
     if np.issubdtype(ref.dtype, np.integer):
         info = np.iinfo(ref.dtype)

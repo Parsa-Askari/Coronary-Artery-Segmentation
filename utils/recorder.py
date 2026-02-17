@@ -31,11 +31,10 @@ class HistoryRecorder:
         self.class_wise_losses = {"train":[],"valid":[]}
         self.class_count = class_count 
         
-    def add_losses(self,part,loss_dict,class_wise_loss=None):
+    def add_losses(self,part,loss_dict):
         for loss_name,loss in loss_dict.items():
             self.history[part][loss_name][-1] += [loss]
         # print(class_wise_loss.shape)
-        self.class_wise_losses[part].append(class_wise_loss)
 
     def add_metrics(self,dice,precision,recall,part):
         dice = dice[1:]
@@ -53,7 +52,7 @@ class HistoryRecorder:
             self.history[part][key][-1] = np.mean(self.history[part][key][-1])
             self.history[part][key].append([])
         
-    def print_loss_report(self,part,epoch,avg_first=True,class_wise=False):
+    def print_loss_report(self,part,epoch,avg_first=True):
         if(avg_first):
             self.avg_losses(part)
             
@@ -69,18 +68,18 @@ class HistoryRecorder:
             else:
                 report+=" - "
             co+=1  
-        if(class_wise==True):
-            report +="\nclass wise loss :\n"
+        # if(class_wise==True):
+        #     report +="\nclass wise loss :\n"
             
-            self.class_wise_losses[part] = np.stack(
-                self.class_wise_losses[part] ,axis=0
-            ).mean(axis=0).tolist() # (C-1)
-            for i , class_loss in enumerate(self.class_wise_losses[part]):
-                c = self.class_maps[i+1]
-                report += f"{c} : {class_loss}\n"
+        #     self.class_wise_losses[part] = np.stack(
+        #         self.class_wise_losses[part] ,axis=0
+        #     ).mean(axis=0).tolist() # (C-1)
+        #     for i , class_loss in enumerate(self.class_wise_losses[part]):
+        #         c = self.class_maps[i+1]
+        #         report += f"{c} : {class_loss}\n"
                 
-            self.class_wise_losses[part]=[] 
-            report += "=========================="
+        #     self.class_wise_losses[part]=[] 
+        #     report += "=========================="
             
         print(report)
     def print_metrics_report(self,part,epoch,class_wise=False):

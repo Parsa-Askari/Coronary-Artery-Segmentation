@@ -16,7 +16,7 @@ from skimage.morphology import skeletonize
 import seaborn as sns
 import json
 ###IE###
-from .dataset import UnetExampleDataset , TrainUnetDataset , collate_fn_train
+from .dataset import UnetExampleDataset , TrainUnetDataset 
 ###SS###
 def read_images(base_path, part,preprocessor,max_workers=None,chosen_labels = None):
     base_path = Path(base_path)
@@ -49,7 +49,7 @@ def read_images(base_path, part,preprocessor,max_workers=None,chosen_labels = No
     return results
 
 @torch.no_grad()
-def make_example_datasets(valid_images,image_names,transform):
+def make_example_datasets(valid_images,image_names,transform,normalizer):
     img_dict = {"easy":[],"normal":[],"hard":[],"very hard":[]}
     for img, label , name_stem in valid_images : 
         for diff in image_names:
@@ -59,50 +59,20 @@ def make_example_datasets(valid_images,image_names,transform):
     for diff , images in img_dict.items():
         ds = TrainUnetDataset(
             transform = transform,
-            data = images
+            data = images,
+            example_phase=True,
+            normalizer = normalizer
         )
         dl = DataLoader(
             ds,
             batch_size=1,
             num_workers=0,
             shuffle=False,
-            collate_fn=collate_fn_train
         )
         img_dict[diff] = dl
 
     return img_dict
 
-@torch.no_grad()
-def no_teacher_forcing_pipeline(model,contexts,targets,class_count,device):
-    """
-    contexts = B x 2 x H x W
-    targets = B x T x H x W
-    """
-    t_max = targets.shape[1]
-    b_size = targets.shape[0]
-    full_target_preds = []
-    contexts = contexts.to(device)
-    for i in range(t_max):
-        pred_target = model(contexts) # B x 26 x H x W
-        full_target_preds.append(pred_target)
-        pred_target = torch.argmax(pred_target,dim=1) # B x H x W
-        contexts[:,0] = pred_target
-
-    full_target_preds = torch.stack(full_target_preds,dim=0) # T x B x 26 x H x W
-
-    full_target_preds = full_target_preds.permute(1,0,2,3,4) # B x T x 26 x H x W
-    
-    return full_target_preds, targets.to(device) , b_size , t_max
-
-def to_device(img,gt_mask,device,binary_mode):
-    gt_mask = gt_mask.long()
-    img = img.to(device)
-    gt_mask = gt_mask.to(device)
-    if(binary_mode):
-        gt_label = gt_label.to(device)
-    else :
-        gt_label = None
-    return img , gt_mask 
 
 
 def crop_dims(target , current):
@@ -118,23 +88,7 @@ def padd_dims(target , current):
     padded = F.pad(current, (0, pad_w, 0, pad_h), mode='constant', value=0)
     return padded
 
-@torch.no_grad()
-def process_masks(pred_targets , b_size , t_max , target_shape , class_count):
-    """
-    inputs : pred_targets , targets
-        - pred_targets = B , T , class_counts , H , W
-    outputs : pred_targets , targets
-        - pred_targets = B , class_count , H , W 
-    """
-    pred_targets = torch.logsumexp(pred_targets, dim=1) # B,class_count,H,W
-    pred_targets = pred_targets.argmax(dim=1) # B,H,W
-    pred_targets = F.one_hot(pred_targets, num_classes=class_count) # B , H , W , class_count
-    pred_targets = pred_targets.permute(0, 3, 1, 2).float()  # B , class_count , H , W 
 
-    # targets = targets.view(b_size,t_max,*target_shape) # B , T , H, W
-    # targets = targets.max(dim=1).values # B , H , W
-
-    return pred_targets #, targets
 @torch.no_grad()
 def TP_TN_FP_FN(preds,gt,process_preds=False,return_TN=False):
     if(process_preds):
@@ -251,41 +205,35 @@ def pre_soft_skeletonize(base_path,output_path,batch_size=10,k=25):
                 name_buffer = []
 
 @torch.no_grad()
-def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=None,draw_plot = True,class_count=26):
+def compute_confution_matrix(data_loader,model,class_maps,
+                             output_folder_path=None,
+                             draw_plot = True,class_count=26,
+                             training_mode = "binary"
+                             ):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     conf_mat = torch.zeros((class_count,class_count))
     model.eval()
-    for imgs , masks , stop_labels , full_masks in tqdm(data_loader):
-        seq_len = masks.shape[1]
-        b_size = imgs.shape[0]
-        masks = masks.reshape(-1,masks.shape[2],masks.shape[3])
+    for imgs, gt_binary_masks, gt_multi_masks in tqdm(data_loader):
             
         imgs = imgs.to(device)
-        masks = masks.to(device)
-        stop_labels = stop_labels.to(device)
+        if(training_mode=="binary"):
+            gt_masks = gt_binary_masks.to(device)
+        else:
+            gt_masks = gt_multi_masks.to(device)
         with torch.autocast(device_type=device,dtype=torch.float16):
-            pred_stop_labels,pred_masks =  model(imgs,seq_len)
-            # pred_targets : B * T x 26 x H x W
-            # targets : B * T x H x W
-        masks = masks.cpu()
-        full_masks = full_masks.to(device)
-        pred_targets  = process_masks(
-            pred_targets=pred_masks,
-            b_size=b_size,
-            t_max=seq_len,
-            target_shape=(masks.shape[1],masks.shape[2]),
-            class_count=class_count
-        )
-        # pred_targets = B , 26 , H , W 
-        # targets : B x H x W
-        full_masks = full_masks.reshape(-1)
-        pred_targets = torch.argmax(pred_targets,dim=1).view(-1) # B x H x W
-        encoded_results = (full_masks*class_count + pred_targets).cpu() # # B x H x W
+            pred_masks =  model(imgs)[0]
+            # pred_targets : B x k x H x W
+            # targets : B x H x W
+
+        gt_masks = gt_masks.reshape(-1)
+        pred_masks = torch.argmax(pred_masks,dim=1).view(-1) # B x H x W
+        encoded_results = (gt_masks*class_count + pred_masks).cpu() # # B x H x W
         counts = torch.bincount(encoded_results,minlength=class_count**2).view(class_count,class_count)
         conf_mat += counts
         
     conf_mat = conf_mat.float() / conf_mat.sum(dim=1,keepdims=True).clamp(min=1)
     conf_mat = conf_mat.numpy()
+
     if(draw_plot):
         class_names = ["background" for i in range(class_count)]
         for index , name in class_maps.items():
@@ -307,13 +255,15 @@ def compute_confution_matrix(data_loader,model,class_maps,output_folder_path=Non
             out_path = os.path.join(output_folder_path,"conf_mat.png")
             plt.savefig(out_path)
     return conf_mat
-def denormalize(img_norm):
-    IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    img = img_norm * IMAGENET_STD + IMAGENET_MEAN
-    img = np.clip(img, 0.0, 1.0)
-    img_u8 = (img * 255).astype(np.uint8)
-    return img_u8
+def denormalize(img_norm,channels):
+    if(channels==3):
+        IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img = img_norm * IMAGENET_STD + IMAGENET_MEAN
+        img = np.clip(img, 0.0, 1.0)
+        img_u8 = (img * 255).astype(np.uint8)
+        return img_u8
+    
 
 def erode(mask):
     h_pool = -F.max_pool2d(-mask,(3,1),(1,1),(1,0))

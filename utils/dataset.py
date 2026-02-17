@@ -11,62 +11,14 @@ import random
 from torch.utils.data import Sampler
 ###IE###
 ###SS###
-def collate_fn_train(batch):
-    """
-    batch : list of batches [img, mask , m_labels, m_taken] 
-        -   img : (C,H,W)
-        -   mask : (H,W)
-        -   m_labels : (unique_len,H,W)
-        -   m_taken : (unique_len,H,W)
-    """
-    lengths = [x[2].shape[0] for x in batch]
-    max_t = max(lengths)+1
-    batch_size = len(batch)
-    
-    C , H, W = batch[0][0].shape 
-    
-    batch_imgs = torch.zeros((batch_size,max_t,C,H, W), dtype=torch.float32)
-    batch_masks = torch.zeros((batch_size, H, W), dtype=torch.long)
-    batch_m_labels = torch.zeros((batch_size, max_t, H, W), dtype=torch.long)
-    batch_m_taken = torch.zeros((batch_size, max_t, 1, H, W), dtype=torch.long)
-    batch_current_label = torch.zeros((batch_size, max_t, 26), dtype=torch.long)
-
-    for i, (img, mask , m_labels, m_taken) in enumerate(batch):
-        t = lengths[i]
-        u = np.unique(mask)[1:].astype(int)
-
-        img_t = torch.from_numpy(img)
-        mask_t = torch.from_numpy(mask)
-        m_labels_t = torch.from_numpy(m_labels)
-        m_taken_t = torch.from_numpy(m_taken)
-        u_t = torch.from_numpy(u)
-
-        batch_imgs[i,:] = img_t
-        batch_masks[i] = mask_t 
-        batch_m_labels[i, :t] = m_labels_t
-        batch_m_taken[i, :t, 0] = m_taken_t
-
-        batch_current_label[i,torch.arange(len(u)) ,u_t] = 1
-        batch_current_label[i, u.shape[0] ,0] = 1
-        
-        batch_m_taken[i , t:] = m_taken_t[-1]
-
-    # batch_current_label = torch.cumsum(batch_current_label,dim=1)
-    """
-    batch_imgs : (B,seq_len,C,H,W)
-    batch_masks : (B, H, W)
-    batch_m_labels : (B, seq_len, H, W)
-    batch_m_taken : (B, seq_len, 1, H, W)
-    batch_current_label : (B, max_t, 26)
-    """
-    return batch_imgs, batch_masks, batch_m_labels, batch_m_taken , batch_current_label
 
 class TrainUnetDataset(Dataset):
-    def __init__(self, transform, data):
+    def __init__(self, transform,data,normalizer,example_phase=False):
         super(TrainUnetDataset, self).__init__()
         self.data = data
         self.transform = transform
-
+        self.normalizer = normalizer
+        self.example_phase = example_phase
     def __len__(self):
         return len(self.data)
 
@@ -81,34 +33,27 @@ class TrainUnetDataset(Dataset):
         if mask.ndim == 2: mask = mask[..., None]
 
         result = self.transform(image=img, mask=mask)
-        new_image = result['image']
-        new_mask = result['mask']
+        new_image_not_normal  = result['image']
+        new_mask= result['mask']
+
+        new_image = self.normalizer(image = new_image_not_normal)["image"]
+
+        multi_mask = torch.from_numpy(new_mask).squeeze(-1).long() #(H,W)
+        binary_mask = (multi_mask !=0).squeeze(-1).long() #(H,W)
+        
 
         if torch.is_tensor(new_image): new_image = new_image.numpy()
-        if torch.is_tensor(new_mask): new_mask = new_mask.numpy()
         
         # turn image shape to : (C,H,W)
         if new_image.ndim == 3 : 
             new_image = new_image.transpose(2, 0, 1) 
         elif new_image.ndim == 2:
             new_image = new_image[None, :, :] 
-        # mask shape to : (H,W)
-        if new_mask.ndim == 3: new_mask = new_mask.squeeze(-1)
 
-        u = np.unique(new_mask)
-        labels = u[1:] if u[0] == 0 else u
-        # m_labels : (unique_len,H,W)
-        start_mask = np.zeros((1,new_image.shape[1],new_image.shape[2]))
-        m_labels = (new_mask[None, :, :] == labels[:, None, None]).astype(np.float32) * labels[:, None, None]
+        if(self.example_phase):
+            return new_image_not_normal,new_image, binary_mask, multi_mask
         
-
-        m_labels = np.concatenate([start_mask,m_labels],axis=0)
-        # m_taken : (unique_len,H,W)
-        m_taken = (np.cumsum(m_labels,axis=0)!=0).astype(int)
-
-
-        return new_image, new_mask , m_labels, m_taken
-
+        return new_image, binary_mask, multi_mask
 
 class UnetExampleDataset(Dataset):
     def __init__(self,transform,data,base_transform=None):
