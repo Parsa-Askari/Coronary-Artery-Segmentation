@@ -2,18 +2,28 @@ import numpy as np
 import json
 import os
 import matplotlib.pyplot as plt
+import torch
+from sklearn.metrics import (
+    f1_score , accuracy_score , 
+    precision_score , recall_score,
+    average_precision_score,matthews_corrcoef
+)
+from sklearn.preprocessing import label_binarize
 ###IE###
+from utils.helpers import mimority_pr_auc
 ###SS###
 class HistoryRecorder:
     def __init__(self,class_maps,losses_keys,class_count = 25):
 
         self.history = {
             "train":{},
-            "valid":{}
+            "valid":{},
+            "test":{}
         }
         for key in losses_keys:
             self.history["train"][key] = [[]]
             self.history["valid"][key] = [[]]
+            self.history["test"][key] = [[]]
         self.losses_keys = losses_keys
         self.metric_history={}
         self.class_maps =class_maps
@@ -26,7 +36,8 @@ class HistoryRecorder:
                 
         self.metric_avg_list = {
             "train":{"dice":[],"precision":[],"recall":[]},
-            "valid":{"dice":[],"precision":[],"recall":[]}
+            "valid":{"dice":[],"precision":[],"recall":[]},
+            "test":{"dice":[],"precision":[],"recall":[]}
         }
         self.class_wise_losses = {"train":[],"valid":[]}
         self.class_count = class_count 
@@ -115,3 +126,151 @@ class HistoryRecorder:
 
 
 
+class GnnHistoryRecorder:
+    def __init__(self,losses_keys,training_mode,class_count = 25):
+        self.parts = ["train","val"]
+        self.class_history = {
+            "train":{
+                "true":[],
+                "pred":[]
+            },
+            "val":{
+                "true":[],
+                "pred":[]
+            }
+        }
+        self.full_loss_dict = {
+            "train":{key : [[]] for key in losses_keys},
+            "val":{key : [[]] for key in losses_keys}
+        }
+        metric_keys = ["f1","per","rec"]
+        self.full_metric_dict = {
+            "train":{key : [] for key in metric_keys},
+            "val":{key : [] for key in metric_keys}
+        }
+        self.class_count = class_count
+        self.traning_mode = training_mode
+        self.losses_keys = losses_keys
+        self.metric_keys = metric_keys
+    def save_pred_history(self, y_true, y_pred, part):
+        if torch.is_tensor(y_true):
+            y_true = y_true.detach().cpu().numpy()
+        if torch.is_tensor(y_pred):
+            y_pred = y_pred.detach().cpu().numpy()
+
+        y_true = np.asarray(y_true).reshape(-1)
+
+        if self.traning_mode != "multi":
+            y_pred = np.asarray(y_pred)[..., 1].reshape(-1)
+        else:
+            y_pred = np.asarray(y_pred)
+
+        self.class_history[part]["true"].append(y_true)
+        self.class_history[part]["pred"].append(y_pred)
+    def save_loss_history(self,loss_dict,part):
+        for key , value in loss_dict.items():
+            self.full_loss_dict[part][key][-1].append(value)
+    def calc_metrics(self, y_trues, y_preds, y_pred_probs):
+        average = "macro"
+
+        y_trues = np.asarray(y_trues)
+        y_preds = np.asarray(y_preds)
+        y_pred_probs = np.asarray(y_pred_probs)
+
+        f1 = f1_score(y_trues, y_preds, average=average, zero_division=0)
+        per = precision_score(y_trues, y_preds, average=average, zero_division=0)
+        rec = recall_score(y_trues, y_preds, average=average, zero_division=0)
+        # mcc = matthews_corrcoef(y_trues, y_preds)
+        # acc = accuracy_score(y_trues, y_preds)
+
+        # if self.traning_mode != "multi":
+        #     auc = average_precision_score(y_trues, y_pred_probs)
+        #     m_auc = mimority_pr_auc(y_trues, y_pred_probs)
+        # else:
+        #     classes = np.arange(self.class_count)
+        #     y_true_bin = label_binarize(y_trues, classes=classes)
+
+        #     auc = average_precision_score(
+        #         y_true_bin,
+        #         y_pred_probs,
+        #         average="macro"
+        #     )
+
+        #     m_auc = mimority_pr_auc(y_trues, y_pred_probs)
+
+        return {
+            "f1": f1,
+            "per": per,
+            "rec": rec,
+            # "acc": acc,
+            # "auc": auc,
+            # "m_auc": m_auc,
+            # "mcc": mcc,
+        }
+    
+    def generate_full_report(self, epoch):
+        full_report = []
+        val_f1 = None
+
+        for part in self.parts:
+            report_parts = [f"{part} [{epoch}]:\nlosses :"]
+
+            for loss_type, losses in self.full_loss_dict[part].items():
+                loss_mean = float(np.mean(losses[-1])) if len(losses[-1]) > 0 else 0.0
+                report_parts.append(f"{loss_type}:{loss_mean:.5f}|")
+
+                self.full_loss_dict[part][loss_type][-1] = loss_mean
+                self.full_loss_dict[part][loss_type].append([])
+
+            # Nothing to evaluate
+            if len(self.class_history[part]["true"]) == 0:
+                full_report.append("".join(report_parts))
+                continue
+
+            y_trues = np.concatenate(self.class_history[part]["true"], axis=0)
+            y_pred_probs = np.concatenate(self.class_history[part]["pred"], axis=0)
+
+            if self.traning_mode != "multi":
+                y_preds = (y_pred_probs >= 0.5).astype(np.int64)
+            else:
+                y_preds = np.argmax(y_pred_probs, axis=1)
+
+            metric_dict = self.calc_metrics(y_trues, y_preds, y_pred_probs)
+
+            for key, val in metric_dict.items():
+                self.full_metric_dict[part][key].append(val)
+
+            self.class_history[part]["true"].clear()
+            self.class_history[part]["pred"].clear()
+
+            metric_report_parts = ["\nmetrics: "]
+            n_metrics = len(metric_dict)
+
+            for i, (key, val) in enumerate(metric_dict.items()):
+                metric_report_parts.append(f"{key}:{val:.5f}")
+
+                if i == n_metrics - 1:
+                    continue
+                elif (i + 1) % 3 == 0:
+                    metric_report_parts.append("\n")
+                else:
+                    metric_report_parts.append("|")
+
+            report_parts.append("".join(metric_report_parts))
+
+            full_report.append("".join(report_parts))
+
+            if part == "val":
+                val_f1 = metric_dict["f1"]
+
+        full_report = "\n===================\n".join(full_report)
+        print(full_report)
+
+        return val_f1
+if __name__ == "__main__":
+    ls = ["1","2"]
+    print("\n==\n".join(ls))
+
+    
+        
+        

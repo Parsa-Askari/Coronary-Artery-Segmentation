@@ -5,7 +5,7 @@ from torchvision.models.swin_transformer import (
     Swin_B_Weights,Swin_V2_B_Weights,
     Swin_T_Weights,Swin_V2_T_Weights
 )
-from transformers import AutoModelForSemanticSegmentation
+from transformers import AutoModelForSemanticSegmentation , AutoConfig
 import torch.nn as nn
 import numpy as np
 import torch
@@ -69,57 +69,211 @@ class SwinEncoder(nn.Module):
         z = self.backbone.permute(z)
         return self.head(z)
 
+class SwinUperNet3(nn.Module):
+    def __init__(self,args):
+        super(SwinUperNet3,self).__init__()
+        model_name = "openmmlab/upernet-swin-base"
+        # config = AutoConfig.from_pretrained(model_name, local_files_only=True)
+        # config.backbone_config.window_size = 10
+
+        self.model = AutoModelForSemanticSegmentation.from_pretrained(
+            model_name,
+            local_files_only=True,
+            # ignore_mismatched_sizes=True,
+            # config=config
+        )
+
+        self.conv1x1 = nn.Conv2d(
+            in_channels=args["swin"]["encoder_out_channels"],
+            out_channels=args["class_count"],
+            kernel_size=1
+        )
+        self.input_conv = nn.Sequential(
+            nn.Conv2d(in_channels=7+3,out_channels=3,kernel_size=3,padding=1),
+            nn.BatchNorm2d(3),
+            nn.ReLU(inplace=True)
+        )
+        class_count = args["class_count"]
+        if(args["deep_super_vision"]):
+            self.dsv0_conv = nn.Conv2d(in_channels=512,out_channels=class_count,kernel_size=1)
+            self.dsv1_conv = nn.Conv2d(in_channels=512,out_channels=class_count,kernel_size=1)
+            self.dsv2_conv = nn.Conv2d(in_channels=512,out_channels=class_count,kernel_size=1)
+        
+        self.deep_super_vision = args["deep_super_vision"]
+        self.features = {}
+        self._set_hooks()
+
+    def _get_hook(self, name):
+        def hook(model, input, output):
+            self.features[name] = output
+        return hook
+
+    def _set_hooks(self):
+
+        head = self.model.decode_head
+        head.lateral_convs[0].register_forward_hook(self._get_hook('lat0'))
+        head.lateral_convs[1].register_forward_hook(self._get_hook('lat1'))
+        head.lateral_convs[2].register_forward_hook(self._get_hook('lat2'))
+
+    def forward(self,x,gt_mask=None,ep=None):
+        outs = []
+        z = self.input_conv(x)
+        z = self.model(z).logits
+        if(self.deep_super_vision):
+            out0 = self.dsv0_conv(self.features['lat0'])
+            out1 = self.dsv1_conv(self.features['lat1'])
+            out2 = self.dsv2_conv(self.features['lat2'])
+            outs = [out0,out1,out2]
+        z = self.conv1x1(z)
+        return [z] + outs , 0
+
+class SwinUperNet2(nn.Module):
+
+    def __init__(self, args):
+        super().__init__()
+        base_c = 10
+        class_count = args["class_count"] 
+        encoder_out_c = args["swin"]["encoder_out_channels"]
+        self.warmup_ep = args["swin"]["warmup_ep"]
+        self.class_count = class_count
+        model_name = "openmmlab/upernet-swin-base"
+
+        self.model = AutoModelForSemanticSegmentation.from_pretrained(
+            model_name,
+            local_files_only=True,
+
+        )
+        self.compresser = nn.Conv2d(encoder_out_c, base_c, kernel_size=1)
+
+        def head(in_c):
+            return nn.Sequential(
+                nn.Conv2d(in_c, base_c, kernel_size=3, padding=1),
+                nn.GroupNorm(2, base_c),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(base_c, 1, kernel_size=1),
+            )
+
+        self.classifier_5  = head(base_c) 
+        self.classifier_6  = head(base_c + 1)
+        self.classifier_7  = head(base_c + 1)
+        self.classifier_8  = head(base_c + 1)
+        self.classifier_11 = head(base_c + 1)
+        self.classifier_13 = head(base_c + 1)
+        self.add_bg_c      = nn.Conv2d(base_c, 1, kernel_size=1)
+
+
+    @staticmethod
+    def _cond(pred_logit, gt_ch, p_gt):
+        if p_gt <= 0.0:
+            return torch.sigmoid(pred_logit)
+        if p_gt >= 1.0:
+            return gt_ch
+        use_gt = torch.rand(pred_logit.shape[0], 1, 1, 1,
+                            device=pred_logit.device) < p_gt
+        return torch.where(use_gt, gt_ch, torch.sigmoid(pred_logit))
+
+    def forward(self, x, gt_mask=None, ep=None):
+        z = self.compresser(self.model(x).logits)
+
+        if self.training and gt_mask is not None and ep is not None:
+            p_gt = max(0.0, 1.0 - ep / max(1, self.warmup_ep))
+        else:
+            p_gt = 0.0
+
+        gt_oh = None
+        if gt_mask is not None:
+            gt_oh = F.one_hot(gt_mask, self.class_count).permute(0, 3, 1, 2).to(z.dtype)
+
+        out_5  = self.classifier_5(z)
+        c5     = self._cond(out_5,  gt_oh[:, 1:2] if gt_oh is not None else None, p_gt)
+
+        out_6  = self.classifier_6(torch.cat([c5, z], 1))
+        c6     = self._cond(out_6,  gt_oh[:, 2:3] if gt_oh is not None else None, p_gt)
+
+        out_7  = self.classifier_7(torch.cat([c6, z], 1))
+        c7     = self._cond(out_7,  gt_oh[:, 3:4] if gt_oh is not None else None, p_gt)
+
+        out_8  = self.classifier_8(torch.cat([c7, z], 1))
+
+        out_11 = self.classifier_11(torch.cat([c5, z], 1))
+        c11    = self._cond(out_11, gt_oh[:, 5:6] if gt_oh is not None else None, p_gt)
+
+        out_13 = self.classifier_13(torch.cat([c11, z], 1))
+
+        out_bg = self.add_bg_c(z)
+        channels = [out_bg, out_5, out_6, out_7, out_8, out_11, out_13]
+        out = torch.cat(channels, dim=1)
+
+        aux = None
+        if gt_oh is not None:
+            aux = sum(
+                F.binary_cross_entropy_with_logits(logit, gt_oh[:, i:i + 1])
+                for i, logit in enumerate(channels)
+            )
+
+        outs = []
+
+        return [out] , aux
+
+
 class SwinUperNet(nn.Module):
     def __init__(self,args):
         super(SwinUperNet,self).__init__()
         model_name = "openmmlab/upernet-swin-base"
-        self.model = AutoModelForSemanticSegmentation.from_pretrained(model_name)
+        # config = AutoConfig.from_pretrained(model_name, local_files_only=True)
+        # config.backbone_config.window_size = 10
+
+        self.model = AutoModelForSemanticSegmentation.from_pretrained(
+            model_name,
+            local_files_only=True,
+            # ignore_mismatched_sizes=True,
+            # config=config
+        )
+
         self.conv1x1 = nn.Conv2d(
-            in_channels=150,
+            in_channels=args["swin"]["encoder_out_channels"],
             out_channels=args["class_count"],
             kernel_size=1
         )
-    def forward(self,x):
+        class_count = args["class_count"]
+        if(args["deep_super_vision"]):
+            self.dsv0_conv = nn.Conv2d(in_channels=512,out_channels=class_count,kernel_size=1)
+            self.dsv1_conv = nn.Conv2d(in_channels=512,out_channels=class_count,kernel_size=1)
+            self.dsv2_conv = nn.Conv2d(in_channels=512,out_channels=class_count,kernel_size=1)
+        
+        self.deep_super_vision = args["deep_super_vision"]
+        self.features = {}
+        self._set_hooks()
+
+    def _get_hook(self, name):
+        def hook(model, input, output):
+            self.features[name] = output
+        return hook
+
+    def _set_hooks(self):
+
+        head = self.model.decode_head
+        head.lateral_convs[0].register_forward_hook(self._get_hook('lat0'))
+        head.lateral_convs[1].register_forward_hook(self._get_hook('lat1'))
+        head.lateral_convs[2].register_forward_hook(self._get_hook('lat2'))
+
+    def forward(self,x,gt_mask=None,ep=None):
+        outs = []
         z = self.model(x).logits
+        if(self.deep_super_vision):
+            out0 = self.dsv0_conv(self.features['lat0'])
+            out1 = self.dsv1_conv(self.features['lat1'])
+            out2 = self.dsv2_conv(self.features['lat2'])
+            outs = [out0,out1,out2]
         z = self.conv1x1(z)
-        return [z]
+        return [z] + outs , 0
+    
 if __name__ == "__main__":
-    args = {
-        "base_path" : "../arcade/nnUnet_dataset/syntax",
-        "in_c" : 3,
-        "base_channel" :32,
-        "image_shape" : (448,448),
-        "class_count" : 26 ,
-        "attention" : True,
-        "k":40,
-        "batch_size" : 10,
-        "num_workers" : 10,
-        "device" : "cuda" if torch.cuda.is_available() else "cpu",
-        "lr" : 0.01,
-        "momentum" : 0.99,
-        "weight_decay" : 3e-5,
-        "epcohs":200,
-        "f_int_scale" : 2,
-        "full_report_cycle" : 10,
-        "max_channels":512,
-        "input_channels":1,
-        "unet_depth":6,
-        "loss_type":"tversky loss",
-        "alpha":0.3,
-        "beta":0.7,
-        "t_gamma":2.0,
-        "f_gamma":2.0,
-        "f_loss_scale":1,
-        "loss_coefs":{"CE":1.0,"Second":1.0},
-        "swin_head" : "costume",
-        "swin_type":"swin_s",
-        "output_base_path" : "./outputs",
-        "name" : "Attention7-DSV-tev-new_augs-binary2color-FCE",
-        "deep_super_vision" : True,
-        "f_alpha":None
-    }
-    model = SwinEncoder(args)
-    inp = torch.rand((1,3,args["image_shape"][0],args["image_shape"][1]))
-    outs = model(inp)
-    for out in outs:
-        print(out.shape)
+    model = SwinUperNet2(
+        args={"swin":{"encoder_out_channels":150,"warmup_ep":3},
+              "deep_super_vision":True,"class_count":7}).cuda()
+
+    x = torch.zeros(1,3,512,512).cuda()
+    outs = model(x,3)
+    for o in outs:
+        print(o.shape)

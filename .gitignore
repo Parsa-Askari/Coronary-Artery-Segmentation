@@ -2,7 +2,47 @@ __pycache__/
 dataset/
 *.pth
 *.html
+.sync.ffs_db
+data.tar.gz
+feature_importance.png
+heart parts.png
+model.onnx
+model.onnx.data
+Screenshot from 2026-08-07 01-43-33.png
+yolo26n.pt
+yolov8x.pt
 vessel_metrics/
 syntax-processed/
 syntax/
 experiments/
+models/Swin_Unet/
+data/model.safetensors
+bootstrap_sequence/
+experiments/
+data/
+hyper_params/
+loss diagnosis/
+model_results/
+outputs/
+runs/
+Swin-Unet/
+temp_preprocess/
+temps/
+val_vis/
+yolo8/
+utils/debuging.py
+utils/fix_rca_gaps.py
+utils/ta_mosc.py
+utils/debuging.py
+utils/tempCodeRunnerFile.py
+utils/temps.py
+utils/testmodel.py
+preprocessing_output/
+scripts/image_clusters.py
+scripts/yolo_evaluate.py 
+notebooks/debugging.ipynb
+notebooks/eval_plots_left.ipynb
+notebooks/eval_plots_right.ipynb
+notebooks/test.ipynb
+notebooks/Topoplogy_Mains.ipynb
+.gitignore

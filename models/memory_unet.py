@@ -67,6 +67,7 @@ class DecoderBlock(nn.Module):
                 out_channels=class_count, 
                 kernel_size=1
             )
+
         self.deep_super_vision = deep_super_vision
     def forward(self,x,skip):
         """
@@ -91,7 +92,7 @@ class DecoderBlock(nn.Module):
         if(self.deep_super_vision):
             dsv_masks = self.dsv_block(z)
             return z , dsv_masks
-        return z
+        return z 
 class Encoder(nn.Module):
     def __init__(self,channel_list,block_counts=4,
                  k=3,p=1,s=1,downsampling="maxpool",
@@ -210,9 +211,9 @@ class MemoryUnet(nn.Module):
         normaliztion = model_args["normaliztion"]
         activation = model_args["activation"]
         dropout = model_args["dropout"]
-        deep_super_vision = model_args["deep_super_vision"]
         first_layer_out_c = model_args["first_layer_out_c"]
 
+        deep_super_vision = args["deep_super_vision"]
         class_count = args["class_count"]
         in_c = args["in_c"]
 
